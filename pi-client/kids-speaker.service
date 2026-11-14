@@ -1,0 +1,14 @@
+[Unit]
+Description=Kids speaker client (wake word -> server -> Bluetooth speaker)
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire-pulse.service wireplumber.service
+
+[Service]
+ExecStart=__DIR__/.venv/bin/python __DIR__/client.py
+WorkingDirectory=__DIR__
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

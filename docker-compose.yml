@@ -1,0 +1,98 @@
+# Домашняя колонка-сказочница.
+# Pi ходит только в gateway (порт 8080). Остальные сервисы живут во внутренней сети compose.
+
+services:
+  gateway:
+    build: ./gateway
+    ports:
+      - "8080:8080"
+    environment:
+      STT_URL: http://stt:8000
+      TTS_URL: http://tts:8000
+      AGENT_URL: http://agent:8000
+      TALES_URL: http://tales:8000
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?укажи PUBLIC_BASE_URL в .env}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+    volumes:
+      - ./library:/library:ro
+      - ./config:/config:ro          # policies.yaml — правится на лету
+      - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
+    depends_on: [stt, tts, agent, tales]
+    restart: unless-stopped
+
+  agent:
+    build: ./agent
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?укажи ANTHROPIC_API_KEY в .env}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
+      TALES_MCP_URL: http://tales:8000/mcp
+      SESSION_IDLE_SEC: ${SESSION_IDLE_SEC:-600}
+    volumes:
+      - ./agent/system_prompt.md:/app/system_prompt.md:ro
+      - ./data/logs:/data/logs
+    depends_on: [tales]
+    restart: unless-stopped
+
+  stt:
+    build: ./stt
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_COMPUTE: int8
+      WHISPER_LANG: ru
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+    volumes:
+      - whisper-models:/models
+    restart: unless-stopped
+
+  tts:
+    build: ./tts
+    environment:
+      PIPER_VOICE: ${PIPER_VOICE:-ru_RU-irina-medium}
+      PIPER_LENGTH_SCALE: ${PIPER_LENGTH_SCALE:-1.1}
+    volumes:
+      - piper-voices:/voices
+    restart: unless-stopped
+
+  tales:
+    build: ./tales
+    # MCP наружу — чтобы подключить библиотеку к Claude Code / Desktop на своём ПК.
+    # Если не нужно — закомментируй ports.
+    ports:
+      - "8090:8000"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      MYSQL_HOST: mysql
+      MYSQL_DATABASE: tales
+      MYSQL_USER: tales
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tales}
+    volumes:
+      - ./library:/library
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    # Порт наружу — чтобы смотреть базу из DBeaver/DataGrip. Не нужно — закомментируй.
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_DATABASE: tales
+      MYSQL_USER: tales
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tales}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  mysql-data:
+  whisper-models:
+  piper-voices:

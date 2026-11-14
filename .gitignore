@@ -1,0 +1,6 @@
+.env
+data/logs/*.jsonl
+data/state/*.json
+__pycache__/
+pi-client/.venv/
+pi-client/config.toml

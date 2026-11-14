@@ -1,0 +1,27 @@
+[server]
+url = "http://192.168.1.50:8080"   # PUBLIC_BASE_URL сервера
+token = ""                           # GATEWAY_TOKEN, если задан
+device_id = "kids-room"
+
+[wakeword]
+# Готовые модели openWakeWord (английские): hey_jarvis, alexa, hey_mycroft, hey_rhasspy.
+# Или путь к своей .onnx-модели.
+model = "hey_jarvis"
+threshold = 0.5      # ложные срабатывания — повысь до 0.6–0.7; не слышит — понизь
+
+[audio]
+mic = ""                    # пусто = по умолчанию; номер или часть имени из `python -m sounddevice`
+# Микрофон по сети вместо USB: старый телефон с приложением IP Webcam.
+# Если задано — mic игнорируется.
+stream_url = ""             # например "http://192.168.1.60:8080/audio.wav"
+vad_aggressiveness = 2      # 0..3: выше — строже отсекает шум
+end_silence_ms = 900        # пауза, после которой фраза считается законченной
+no_speech_timeout_sec = 4   # молчат после сигнала — отбой
+max_record_sec = 10
+
+[player]
+default_volume = 50
+fade_sec = 20               # плавное затухание перед автостопом ночью
+
+[bluetooth]
+speaker_mac = ""            # MAC Станции Лайт — для автопереподключения
