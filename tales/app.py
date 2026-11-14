@@ -25,14 +25,17 @@ def search_tales(query: str = "", age: int | None = None,
 
 
 @mcp.tool()
-def random_tale(tag: str = "", age: int | None = None,
-                max_minutes: int | None = None) -> dict:
-    """Случайная сказка с аудио; можно ограничить тегом (см. list_tags), возрастом и длительностью.
-    Реже слушанные выпадают чаще."""
+def play_random_tale(tag: str = "", age: int | None = None,
+                     max_minutes: int | None = None) -> dict:
+    """Выбрать случайную сказку и СРАЗУ включить её на колонке (одним вызовом, play_tale не нужен).
+    Для «любую», «какую-нибудь», «на ночь», «другую». Можно ограничить тегом (см. list_tags),
+    возрастом и длительностью. Реже слушанные выпадают чаще."""
     tale = db.random_tale(tag or None, age, max_minutes)
     if not tale:
         raise ValueError("Подходящих сказок не нашлось")
-    return tale
+    db.mark_played(tale["id"])
+    return {"ok": True, "tale_id": tale["id"], "playing": tale["title"],
+            "description": tale.get("description", "")}
 
 
 @mcp.tool()

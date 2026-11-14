@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -34,15 +35,16 @@ MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-5-5")
 TALES_MCP_URL = os.getenv("TALES_MCP_URL", "http://tales:8000/mcp")
 IDLE_SEC = int(os.getenv("SESSION_IDLE_SEC", "600"))
 TURN_TIMEOUT = float(os.getenv("AGENT_TURN_TIMEOUT", "30"))
-# Глубина «обдумывания» Claude: low — быстрее (детской болтовне хватает), medium — по умолчанию у Haiku 5.5
-EFFORT = os.getenv("AGENT_EFFORT", "low").strip() or None
+# Глубина «обдумывания» Claude (low|medium|high). Пусто — по умолчанию модели. low на Haiku 5.5
+# заметно не ускоряет короткие ответы, но иногда пропускает шаги — поэтому не включаем.
+EFFORT = os.getenv("AGENT_EFFORT", "").strip() or None
 ALLOWED_DEVICES = {d.strip() for d in os.getenv("ALLOWED_DEVICES", "").split(",") if d.strip()}
 LOG_DIR = Path(os.getenv("LOG_DIR", "/data/logs"))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 SYSTEM_PROMPT = Path(os.getenv("SYSTEM_PROMPT_FILE", "/app/system_prompt.md")).read_text("utf-8")
 
 # Детскому агенту — только эти инструменты (add_tale не выдаём).
-KID_TOOLS = ["search_tales", "random_tale", "list_tags", "get_tale",
+KID_TOOLS = ["search_tales", "play_random_tale", "list_tags", "get_tale",
              "play_tale", "stop_playback", "resume_playback", "seek_playback", "set_volume"]
 ALLOWED_TOOLS = [f"mcp__tales__{t}" for t in KID_TOOLS]
 # Встроенные инструменты Claude Code агенту не нужны. Если SDK умеет задавать базовый
@@ -57,12 +59,28 @@ _OPTION_FIELDS = {f.name for f in dataclasses.fields(ClaudeAgentOptions)}
 # Вызов этих инструментов = команда плееру на Pi
 ACTION_TOOLS = {
     "mcp__tales__play_tale": "play",
+    "mcp__tales__play_random_tale": "play",   # tale_id приходит в результате инструмента
     "mcp__tales__stop_playback": "stop",
     "mcp__tales__resume_playback": "resume",
     "mcp__tales__seek_playback": "seek",
     "mcp__tales__set_volume": "volume",
 }
 FALLBACK_REPLY = "Ой, у меня что-то не получилось. Попробуй ещё раз."
+
+
+def tale_id_from_result(content) -> int | None:
+    """play_random_tale сам выбирает сказку — её id есть только в результате инструмента."""
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    text = str(content or "")
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("tale_id") is not None:
+            return int(data["tale_id"])
+    except (ValueError, TypeError):
+        pass
+    m = re.search(r'"tale_id"\s*:\s*(\d+)', text)
+    return int(m.group(1)) if m else None
 
 
 def volume_action(tool_input: dict) -> dict:
@@ -214,8 +232,10 @@ async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
             for block in msg.content:
                 if isinstance(block, ToolResultBlock) and block.tool_use_id in pending:
                     act = pending.pop(block.tool_use_id)
-                    if not block.is_error:  # play_tale с несуществующим id не включаем
-                        action = act
+                    if act["type"] == "play" and act.get("tale_id") is None:
+                        act["tale_id"] = tale_id_from_result(block.content)
+                    if not block.is_error and not (act["type"] == "play" and act.get("tale_id") is None):
+                        action = act  # play_tale с несуществующим id не включаем
         elif isinstance(msg, ResultMessage):
             cost = msg.total_cost_usd
             result_subtype = getattr(msg, "subtype", None)
