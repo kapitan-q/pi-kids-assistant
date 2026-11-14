@@ -45,6 +45,8 @@ def test_parsers():
     assert ob.parse_name("я Анна Мария") == "Анна Мария"
     assert ob.parse_name("включи мне пожалуйста сказку про колобка") is None
     assert ob.parse_age("мне восемь лет") == 8
+    assert ob.parse_age("Мне шест лет") == 6              # так Whisper иногда слышит «шесть»
+    assert ob.parse_age("двадцать пять") == 25
     assert ob.parse_age("7") == 7
     assert ob.parse_age("я уже взрослый") is None
     assert ob.parse_age("не знаю") == "retry"

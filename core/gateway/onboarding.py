@@ -108,6 +108,17 @@ def parse_name(text: str) -> str | None:
     return " ".join(w.capitalize() for w in words)
 
 
+def _number_word(w: str) -> int | None:
+    """Число словом; терпим недослышанное окончание («шест» → шесть), но не двусмысленность («сем»)."""
+    nums = parent_commands.NUM_WORDS
+    if w in nums:
+        return int(nums[w])
+    if len(w) < 4:
+        return None
+    cands = {int(v) for k, v in nums.items() if k.startswith(w) and len(k) - len(w) <= 1}
+    return cands.pop() if len(cands) == 1 else None
+
+
 def parse_age(text: str) -> int | None | str:
     """Возраст числом; None — не хочет говорить/взрослый; 'retry' — не понятно."""
     t = parent_commands.normalize(text)
@@ -115,10 +126,9 @@ def parse_age(text: str) -> int | None | str:
         return None
     total, found = 0, False
     for w in t.split():
-        if w.isdigit():
-            total, found = total + int(w), True
-        elif w in parent_commands.NUM_WORDS:
-            total, found = total + int(parent_commands.NUM_WORDS[w]), True
+        n = int(w) if w.isdigit() else _number_word(w)
+        if n is not None:
+            total, found = total + n, True
         elif not YEARS.match(w) and found:
             break
     return total if found and 1 <= total <= 120 else "retry"
