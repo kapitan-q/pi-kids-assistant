@@ -276,6 +276,43 @@ def clear_overrides(who: list[str] | None = None) -> int:
         return before - len(state.data["overrides"])
 
 
+def relax(who: list[str] | None = None) -> int:
+    """Вернуть обычный режим: снять временные команды, а если режим всё ещё задаёт
+    расписание (ночь, уроки) — перекрыть его командой default_mode до конца окна.
+    Возвращает число снятых команд."""
+    removed = clear_overrides(who)
+    default = config().get("default_mode", "normal")
+    if who:
+        for sp in who:
+            res = resolve(sp)
+            if res.source == "schedule" and res.mode != default and res.until:
+                add_override(default, res.until, [sp])
+        return removed
+    # для всех: проверяем неизвестного говорящего и каждого ребёнка
+    speakers = [None] + [pid for pid, p in (config().get("profiles") or {}).items()
+                         if p.get("role") != "parent"]
+    untils = [r.until for r in map(resolve, speakers)
+              if r.source == "schedule" and r.mode != default and r.until]
+    if untils:
+        add_override(default, max(untils), None)
+    return removed
+
+
+def check_playback(res: Resolved, tale_tags: str | None) -> str | None:
+    """Можно ли сейчас играть/продолжать сказку с такими тегами.
+    None — можно; иначе фраза, которую сказать ребёнку."""
+    if not children_allowed(res):
+        return res.conf.get("message") or "Сейчас сказки нельзя."
+    remaining = budget_remaining_sec(res)
+    if remaining is not None and remaining <= 0:
+        return res.conf.get("budget_message", "Пора отдыхать.")
+    allowed_tags = [t.lower() for t in res.conf.get("tags") or []]
+    if allowed_tags and tale_tags is not None and \
+            not any(t in tale_tags.lower() for t in allowed_tags):
+        return res.conf.get("tags_message", "Сейчас эту сказку включить нельзя.")
+    return None
+
+
 def status() -> dict:
     with state.lock:
         state.prune()

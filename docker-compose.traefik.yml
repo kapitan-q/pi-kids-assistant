@@ -1,0 +1,24 @@
+# Публикация gateway за общим Traefik (сеть webnet) с basic-auth на весь хост.
+# Подключается через COMPOSE_FILE в .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml
+# Нужны в .env: KS_HOST, BASIC_AUTH_USERS (bcrypt, в одинарных кавычках).
+services:
+  gateway:
+    networks:
+      - default
+      - webnet
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=webnet
+      - traefik.http.routers.kids-speaker.rule=Host(`${KS_HOST:?укажи KS_HOST в .env}`)
+      - traefik.http.routers.kids-speaker.entrypoints=websecure
+      - traefik.http.routers.kids-speaker.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}
+      - traefik.http.routers.kids-speaker.middlewares=kids-speaker-auth,kids-speaker-body
+      - traefik.http.middlewares.kids-speaker-auth.basicauth.users=${BASIC_AUTH_USERS:?укажи BASIC_AUTH_USERS в .env}
+      - traefik.http.middlewares.kids-speaker-auth.basicauth.removeheader=true
+      - traefik.http.middlewares.kids-speaker-body.buffering.maxRequestBodyBytes=5000000
+      - traefik.http.services.kids-speaker.loadbalancer.server.port=8080
+
+networks:
+  webnet:
+    external: true

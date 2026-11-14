@@ -1,4 +1,5 @@
 """Синтез речи: Piper. POST /synthesize {"text": ...} -> audio/wav"""
+import contextlib
 import io
 import os
 import threading
@@ -17,7 +18,17 @@ LENGTH_SCALE = float(os.getenv("PIPER_LENGTH_SCALE", "1.1"))
 VOICES_DIR = Path(os.getenv("PIPER_VOICES_DIR", "/voices"))
 HF_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
-app = FastAPI(title="tts")
+MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1000"))
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _voice
+    _voice = await run_in_threadpool(lambda: PiperVoice.load(str(_download_voice(VOICE))))
+    yield
+
+
+app = FastAPI(title="tts", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 _voice: PiperVoice | None = None
 _lock = threading.Lock()
 
@@ -48,12 +59,6 @@ except ImportError:
         voice.synthesize(text, wf, length_scale=LENGTH_SCALE)
 
 
-@app.on_event("startup")
-def load_voice() -> None:
-    global _voice
-    _voice = PiperVoice.load(str(_download_voice(VOICE)))
-
-
 class SynthIn(BaseModel):
     text: str
 
@@ -70,6 +75,7 @@ async def synthesize(body: SynthIn):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "empty text")
+    text = text[:MAX_CHARS]
     audio = await run_in_threadpool(_render, text)
     return Response(content=audio, media_type="audio/wav")
 

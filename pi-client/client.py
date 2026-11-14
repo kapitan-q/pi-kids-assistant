@@ -5,6 +5,7 @@
 голосовой ответ (paplay) -> действие с плеером сказок (mpv через IPC-сокет).
 Громкость — системная (pactl), таймер сна — локальный, правила — GET /policy раз в минуту.
 """
+import base64
 import io
 import json
 import logging
@@ -31,6 +32,11 @@ log = logging.getLogger("client")
 CFG = tomllib.loads(Path(os.getenv("KS_CONFIG", Path(__file__).with_name("config.toml"))).read_text())
 SERVER = CFG["server"]["url"].rstrip("/")
 HEADERS = {"X-Token": CFG["server"]["token"]} if CFG["server"].get("token") else {}
+# basic-auth на сервере (Traefik): им же закрыты /media и /speech, поэтому mpv тоже шлёт заголовок
+AUTH = (CFG["server"]["user"], CFG["server"]["password"]) if CFG["server"].get("user") else None
+AUTH_HEADER = ("Authorization: Basic " + base64.b64encode(f"{AUTH[0]}:{AUTH[1]}".encode()).decode()
+               if AUTH else "")
+ASK_TIMEOUT = float(CFG["server"].get("timeout", 45))
 DEVICE_ID = CFG["server"].get("device_id", "kids-room")
 
 RATE = 16000
@@ -77,7 +83,7 @@ def play_file(path: Path | str) -> None:
 
 def play_url(url: str) -> None:
     """Скачать ответ и проиграть: paplay стартует быстрее mpv."""
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = requests.get(url, headers=HEADERS, auth=AUTH, timeout=30)
     r.raise_for_status()
     with tempfile.NamedTemporaryFile(suffix=".wav", dir=CACHE_DIR) as f:
         f.write(r.content)
@@ -126,16 +132,18 @@ class TalePlayer:
     def __init__(self) -> None:
         self.sock = str(STATE_DIR / "mpv.sock")
         Path(self.sock).unlink(missing_ok=True)
-        self.proc = subprocess.Popen([
-            "mpv", "--idle=yes", "--no-video", "--no-terminal", "--volume=100",
-            f"--input-ipc-server={self.sock}",
-        ])
+        args = ["mpv", "--idle=yes", "--no-video", "--no-terminal", "--volume=100",
+                f"--input-ipc-server={self.sock}"]
+        if AUTH_HEADER:
+            args.append(f"--http-header-fields={AUTH_HEADER}")
+        self.proc = subprocess.Popen(args)
         for _ in range(50):
             if Path(self.sock).exists():
                 break
             time.sleep(0.1)
         self.lock = threading.Lock()
         self.stop_at: float | None = None   # monotonic-время автостопа
+        self.tale_id: int | None = None     # что сейчас загружено — сервер проверяет правила при «продолжай»
         self.fade_sec = float(CFG["player"].get("fade_sec", 20))
 
     def cmd(self, *args):
@@ -170,7 +178,8 @@ class TalePlayer:
     def playing(self) -> bool:
         return self.loaded() and not self.get("pause")
 
-    def play(self, url: str, stop_after_sec: int | None) -> None:
+    def play(self, url: str, stop_after_sec: int | None, tale_id: int | None = None) -> None:
+        self.tale_id = tale_id
         self.cmd("set_property", "volume", 100)
         self.cmd("loadfile", url, "replace")
         self.cmd("set_property", "pause", False)
@@ -187,6 +196,7 @@ class TalePlayer:
         self.cmd("stop")
         self.cmd("set_property", "volume", 100)
         self.stop_at = None
+        self.tale_id = None
 
     def seek(self, seconds: int, mode: str) -> None:
         if self.loaded():
@@ -288,9 +298,10 @@ class Client:
     def ask(self, samples: np.ndarray) -> dict:
         buf = io.BytesIO()
         write_wav(buf, samples)
-        r = requests.post(f"{SERVER}/ask", headers=HEADERS, timeout=60,
+        now_playing = self.player.tale_id if self.player.loaded() else None
+        r = requests.post(f"{SERVER}/ask", headers=HEADERS, auth=AUTH, timeout=ASK_TIMEOUT,
                           files={"audio": ("q.wav", buf.getvalue(), "audio/wav")},
-                          data={"device_id": DEVICE_ID})
+                          data={"device_id": DEVICE_ID, "now_playing": now_playing or ""})
         r.raise_for_status()
         return r.json()
 
@@ -311,7 +322,7 @@ class Client:
         kind = act.get("type")
         log.info("действие: %s", act)
         if kind == "play":
-            self.player.play(act["url"], (lim or {}).get("stop_after_sec"))
+            self.player.play(act["url"], (lim or {}).get("stop_after_sec"), act.get("tale_id"))
         elif kind == "stop":
             self.player.stop()
         elif kind == "resume":
@@ -333,60 +344,77 @@ class Client:
         was_playing = self.player.playing()
         if was_playing:
             self.player.pause()
-        play_file(SOUNDS["wake"])
-        self.drain()  # не отправлять на сервер свой же сигнал
-        samples = self.record_utterance()
-        if samples is None:
-            log.info("тишина после слова активации")
-            if was_playing:
-                self.player.resume()
-            return
-        play_file(SOUNDS["done"])
+        handled = False  # True — сервер ответил по делу, плеером управляет его action
         try:
-            resp = self.ask(samples)
-        except Exception as e:  # noqa: BLE001
-            log.error("сервер недоступен: %s", e)
-            play_file(SOUNDS["error"])
-            if was_playing:
-                self.player.resume()
-            return
-        log.info("услышал: %r -> %r (%s)", resp.get("heard"), resp.get("reply"), resp.get("timing_ms"))
-        if not resp.get("heard"):  # ложное срабатывание
-            if was_playing:
-                self.player.resume()
-            return
-        self.apply_limits(resp.get("limits"))
-        if resp.get("speech_url"):
+            play_file(SOUNDS["wake"])
+            self.drain()  # не отправлять на сервер свой же сигнал
+            samples = self.record_utterance()
+            if samples is None:
+                log.info("тишина после слова активации")
+                return
+            play_file(SOUNDS["done"])
             try:
-                play_url(resp["speech_url"])
+                resp = self.ask(samples)
             except Exception as e:  # noqa: BLE001
-                log.error("не удалось проиграть ответ: %s", e)
-        self.apply_action(resp.get("action"), resp.get("limits"), was_playing)
+                log.error("сервер недоступен: %s", e)
+                play_file(SOUNDS["error"])
+                return
+            log.info("услышал: %r -> %r (%s)", resp.get("heard"), resp.get("reply"), resp.get("timing_ms"))
+            if not resp.get("heard"):  # ложное срабатывание
+                return
+            handled = True
+            self.apply_limits(resp.get("limits"))
+            if resp.get("speech_url"):
+                try:
+                    play_url(resp["speech_url"])
+                except Exception as e:  # noqa: BLE001
+                    log.error("не удалось проиграть ответ: %s", e)
+            self.apply_action(resp.get("action"), resp.get("limits"), was_playing)
+        finally:
+            # любая неудача (тишина, сеть, пропал микрофон) — сказка не должна зависнуть на паузе
+            if was_playing and not handled:
+                self.player.resume()
 
     # --- фоновые задачи
 
+    def _check_policy(self) -> None:
+        try:
+            r = requests.get(f"{SERVER}/policy", headers=HEADERS, auth=AUTH, timeout=10)
+            r.raise_for_status()
+            self.apply_limits(r.json())
+        except Exception as e:  # noqa: BLE001
+            log.warning("policy: %s", e)
+
+    def _check_bluetooth(self, mac: str) -> None:
+        try:
+            info = subprocess.run(["bluetoothctl", "info", mac], capture_output=True,
+                                  text=True, timeout=10)
+            if "Connected: yes" in info.stdout:
+                return
+            log.info("Bluetooth: переподключаюсь к %s", mac)
+            subprocess.run(["bluetoothctl", "connect", mac], capture_output=True, timeout=20)
+            time.sleep(2)
+            self.volume.apply()  # новый синк — выставить громкость заново
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("Bluetooth: %s", e)
+
     def background(self) -> None:
+        """Таймер сна, правила и Bluetooth. Ни одна ошибка не должна убить этот поток:
+        без него ночью не сработает автостоп."""
         last_policy = last_bt = 0.0
         mac = CFG.get("bluetooth", {}).get("speaker_mac", "")
         while True:
-            now = time.monotonic()
-            if now - last_policy > 60 and not self.busy.is_set():
-                last_policy = now
-                try:
-                    r = requests.get(f"{SERVER}/policy", headers=HEADERS, timeout=5)
-                    r.raise_for_status()
-                    self.apply_limits(r.json())
-                except Exception as e:  # noqa: BLE001
-                    log.warning("policy: %s", e)
-            if mac and now - last_bt > 30:
-                last_bt = now
-                info = subprocess.run(["bluetoothctl", "info", mac], capture_output=True, text=True)
-                if "Connected: yes" not in info.stdout:
-                    log.info("Bluetooth: переподключаюсь к %s", mac)
-                    subprocess.run(["bluetoothctl", "connect", mac], capture_output=True, timeout=20)
-                    time.sleep(2)
-                    self.volume.apply()  # новый синк — выставить громкость заново
-            self.player.tick()
+            try:
+                now = time.monotonic()
+                if now - last_policy > 60 and not self.busy.is_set():
+                    last_policy = now
+                    self._check_policy()
+                if mac and now - last_bt > 30:
+                    last_bt = now
+                    self._check_bluetooth(mac)
+                self.player.tick()
+            except Exception:  # noqa: BLE001
+                log.exception("ошибка в фоновом цикле")
             time.sleep(0.5)
 
     # --- главный цикл

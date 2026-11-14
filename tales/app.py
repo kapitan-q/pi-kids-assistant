@@ -8,6 +8,7 @@ import db
 
 # host="0.0.0.0" отключает защиту от DNS-rebinding, которая по умолчанию
 # пускает только Host: localhost — иначе agent не достучится по имени "tales".
+# Поэтому порт tales НЕ публикуется наружу: MCP (с add_tale) доступен только внутри compose-сети.
 mcp = FastMCP("tales", host="0.0.0.0", stateless_http=True, json_response=True)
 
 
@@ -121,7 +122,7 @@ async def lifespan(_app: FastAPI):
 
 
 mcp_app = mcp.streamable_http_app()  # создаёт session_manager, endpoint /mcp
-app = FastAPI(title="tales", lifespan=lifespan)
+app = FastAPI(title="tales", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.get("/health")

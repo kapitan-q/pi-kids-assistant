@@ -2,22 +2,41 @@
 
 ```
 Pi 3B (слово активации, микрофон, mpv → Bluetooth → Станция Лайт)
-   │  HTTP
+   │  HTTPS + basic-auth
    ▼
-gateway :8080 ──► stt    (faster-whisper, CPU)
-             ├──► agent  (Claude Agent SDK) ──MCP──► tales (MCP + REST) ──► mysql
-             ├──► tts    (Piper)
-             └──► /media (mp3 из ./library), /speech (озвученные ответы)
+Traefik ──► gateway :8080 ──► stt    (faster-whisper, CPU)
+                         ├──► agent  (Claude Agent SDK) ──MCP──► tales (MCP + REST) ──► mysql
+                         ├──► tts    (Piper)
+                         └──► /media (mp3 из ./library), /speech (озвученные ответы)
 ```
 
 ## Запуск
 
+Наружу не публикуется ни один порт. Как открыть gateway — задаётся в `.env` через `COMPOSE_FILE`:
+
+- `docker-compose.yml:docker-compose.traefik.yml` — сервер titan, `https://ks.dameni.org` за Traefik
+  с basic-auth на весь хост (закрыты и API, и `/media`, `/speech`);
+- `docker-compose.yml:docker-compose.local.yml` — дома, порт 8080 в локальной сети (тогда задай `GATEWAY_TOKEN`).
+
 ```bash
-cp .env.example .env        # вписать ANTHROPIC_API_KEY и PUBLIC_BASE_URL (IP сервера в локалке)
+cp .env.example .env        # ключ, пароли, BASIC_AUTH_USERS, ADMIN_TOKEN — см. комментарии в файле
 docker compose up -d --build
 docker compose logs -f stt tts   # первый старт качает модели Whisper и голос Piper
-curl http://localhost:8080/health
+curl -u speaker:ПАРОЛЬ https://ks.dameni.org/health
 ```
+
+### Деплой на titan
+
+```bash
+# с ПК (из папки проекта)
+tar czf - --exclude=.git --exclude=.env --exclude=pi-client/.venv --exclude=pi-client/config.toml . \
+  | ssh titan 'tar xzf - -C ~/workspace/kids-speaker'
+# на titan
+cd ~/workspace/kids-speaker && docker compose up -d --build
+```
+
+- Бэкап: `scripts/backup.sh` — cron ежедневно в 04:00, дампы MySQL и состояние в `data/backups`, 14 дней.
+- Тесты шлюза: `docker compose run --rm --no-deps gateway sh -c "pip install -q pytest && pytest -q"`.
 
 ## Библиотека
 
@@ -30,39 +49,39 @@ curl http://localhost:8080/health
 ```
 
 ```bash
-docker compose exec tales python import_library.py
+docker compose exec tales python import_library.py           # добавить/обновить
+docker compose exec tales python import_library.py --prune   # и удалить записи без файлов
 ```
 
-Повторный импорт обновляет записи, дубликатов не будет. База доступна снаружи на `localhost:3307`
-(tales / пароль из .env) — удобно править через DBeaver/DataGrip.
+Повторный импорт обновляет записи, дубликатов не будет.
+Порт MySQL не публикуется. Консоль: `docker compose exec mysql mysql -utales -p tales`.
 
 ## Проверка без Pi
 
 ```bash
+AUTH=(-u speaker:ПАРОЛЬ); URL=https://ks.dameni.org
 # текстом
-curl -s localhost:8080/text -H 'Content-Type: application/json' \
+curl -s "${AUTH[@]}" $URL/text -H 'Content-Type: application/json' \
   -d '{"device_id":"test","text":"включи сказку про колобка"}' | jq
 
 # голосом (любой wav/mp3/ogg)
-curl -s localhost:8080/ask -F device_id=test -F audio=@question.wav | jq
+curl -s "${AUTH[@]}" $URL/ask -F device_id=test -F audio=@question.wav | jq
 ```
 
-Если задан `GATEWAY_TOKEN` — добавь `-H 'X-Token: ...'`.
+`device_id` должен быть в `ALLOWED_DEVICES`. Если задан `GATEWAY_TOKEN` — добавь `-H 'X-Token: ...'`.
 
-Логи разговоров: `./data/logs/ГГГГ-ММ-ДД.jsonl` (что услышал, что ответил, какие инструменты, стоимость).
+Логи разговоров: `./data/logs/ГГГГ-ММ-ДД.jsonl` (что услышал, что ответил, какие инструменты, стоимость),
+хранятся `LOG_RETENTION_DAYS` дней.
 Системный промпт: `agent/system_prompt.md`, подхватывается после `docker compose restart agent`.
 
-## MCP сказок в Claude Code / Desktop
+## MCP сказок
 
-Тот же MCP открыт на порту 8090 — можно наполнять библиотеку из Claude Code на своём ПК
-(там доступен ещё инструмент `add_tale`):
+MCP (`/mcp`, с инструментом `add_tale`) доступен только внутри compose-сети — наружу не публикуется.
+Детскому агенту `add_tale` не выдаётся. Наполнение библиотеки — через `import_library.py`.
 
-```bash
-claude mcp add --transport http tales http://<IP-сервера>:8090/mcp
-```
+## Сервер на Windows (вариант «дома»)
 
-## Сервер на Windows
-
+- `COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml`, задай `GATEWAY_TOKEN`.
 - **Docker в WSL2**: Pi по умолчанию не видит порты WSL. На Windows 11 добавь в `%UserProfile%\.wslconfig`:
   ```
   [wsl2]
@@ -73,39 +92,44 @@ claude mcp add --transport http tales http://<IP-сервера>:8090/mcp
 
 ## Настройка скорости
 
-- Whisper: `WHISPER_MODEL=base` быстрее, `small` точнее. `WHISPER_THREADS` = число физических ядер.
-- Claude: `claude-haiku-5-5` быстрее и дешевле, `claude-sonnet-5-5` умнее.
+- Whisper: `WHISPER_MODEL=base` быстрее, `small` точнее. `WHISPER_THREADS` = число физических ядер,
+  `STT_CPUS` — сколько ядер сервера отдать контейнеру.
+- Claude: `claude-haiku-5-5` быстрее и дешевле, `claude-sonnet-5-5` умнее. `AGENT_TURN_TIMEOUT` — сколько ждать ответа.
 - Ответ в `timing_ms` показывает, где тратится время.
 
 ## Режимы и родительский контроль
 
 Всё в `config/policies.yaml` (перечитывается на лету). Правила проверяет **шлюз**, а не Claude,
-поэтому уговорить колонку нарушить режим нельзя.
+поэтому уговорить колонку нарушить режим нельзя — в том числе «продолжай» и перемотку
+сказки, которая не подходит под текущий режим.
 
 - **Режимы**: `normal`, `quiet` (тихий час), `homework` (уроки), `night` (ночь). Свои — добавляй в `modes`.
 - **Расписание**: первое подходящее правило побеждает; окна через полночь работают.
-- **Ночь**: громкость не выше 30, только сказки с тегом «на ночь», всего 60 минут сказок за ночь —
+- **Ночь**: громкость не выше 30, только сказки с тегом «на ночь», 60 минут от первой сказки за ночь —
   Pi получает `limits.stop_after_sec` и сам выключает сказку по таймеру.
 - **Блокирующие режимы** (`allow_children: false`): ребёнку один раз говорится `message`, дальше колонка молчит.
 
 Родительские команды голосом — через кодовую фразу из конфига:
-«Капитан Немо, тихий час на сорок минут», «…режим уроков для старшего до пяти»,
-«…ночной режим», «…отбой тишины». Команда родителя важнее расписания.
+«Капитан Немо, тихий час на сорок пять минут», «…режим уроков для старшего до пяти», «…ночной режим».
+Голосом можно только **ужесточать**: фразу легко подслушать. Она не снимает блокировки и не уходит к Claude.
+Снять режим голосом («…отбой тишины») можно, только если `parent.voice_can_relax: true`, иначе — через админку.
+Снятие возвращает обычный режим и поверх расписания (ночь, уроки) — до конца текущего окна.
 
-Через HTTP (для будущего Telegram-бота):
+Админка по HTTP (basic-auth + `X-Admin-Token`; пустой `ADMIN_TOKEN` — админка выключена):
 
 ```bash
-curl -s localhost:8080/admin/status | jq
-curl -s -X POST localhost:8080/admin/override -H 'Content-Type: application/json' \
+A=(-u speaker:ПАРОЛЬ -H "X-Admin-Token: $ADMIN_TOKEN"); URL=https://ks.dameni.org
+curl -s "${A[@]}" $URL/admin/status | jq
+curl -s "${A[@]}" -X POST $URL/admin/override -H 'Content-Type: application/json' \
   -d '{"mode":"homework","minutes":90,"who":["older"]}'
-curl -s -X DELETE localhost:8080/admin/override
+curl -s "${A[@]}" -X DELETE $URL/admin/override        # обычный режим (и поверх расписания)
 ```
 
-Проверка от лица конкретного ребёнка (пока нет узнавания голоса):
+Проверка от лица конкретного ребёнка (пока нет узнавания голоса; `speaker` учитывается только с admin-токеном):
 
 ```bash
-curl -s localhost:8080/text -H 'Content-Type: application/json' \
-  -d '{"text":"включи колобка","speaker":"older"}' | jq
+curl -s "${A[@]}" $URL/text -H 'Content-Type: application/json' \
+  -d '{"device_id":"test","text":"включи колобка","speaker":"older"}' | jq
 ```
 
 Пока голоса не распознаются, говорящий «неизвестен», и при `unknown_speaker_matches: true`
@@ -114,5 +138,6 @@ curl -s localhost:8080/text -H 'Content-Type: application/json' \
 ## Что дальше
 
 - Клиент для Pi — в папке `pi-client/` (см. README-pi.md).
+- Telegram-бот поверх `/admin/*` вместо голосового снятия режимов.
 - Озвучка текстовых сказок заранее (Silero TTS) и импорт как аудио.
 - RFID-карточки «приложил — играет» в духе Phoniebox.

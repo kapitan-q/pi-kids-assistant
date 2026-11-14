@@ -6,7 +6,8 @@
                       "age_min": 3, "age_max": 8, "description": "..."}
 и/или .txt с текстом сказки. Без json название берётся из ID3-тега или имени файла.
 
-Запуск: docker compose exec tales python import_library.py
+Запуск: docker compose exec tales python import_library.py [--prune]
+  --prune — удалить из базы записи, чьих файлов больше нет в library
 """
 import json
 import os
@@ -36,12 +37,15 @@ def audio_info(path: Path) -> tuple[int | None, str | None]:
 
 
 def main() -> int:
+    prune = "--prune" in sys.argv[1:]
     db.init()
     added = 0
+    seen: set[str] = set()
     for path in sorted(LIBRARY.rglob("*")):
         if path.suffix.lower() not in AUDIO_EXT or not path.is_file():
             continue
         rel = path.relative_to(LIBRARY).as_posix()
+        seen.add(rel)
         duration, id3_title = audio_info(path)
 
         meta = {}
@@ -74,6 +78,14 @@ def main() -> int:
         added += 1
         print(f"[{tale_id}] {title}  ({rel}, {duration or '?'} с)")
     print(f"Готово: {added} файлов")
+    missing = {f: i for f, i in db.files().items() if f not in seen}
+    if missing:
+        if prune:
+            print(f"Удалено записей без файлов: {db.delete(list(missing.values()))}")
+        else:
+            print(f"В базе {len(missing)} записей без файлов (удалить: --prune):")
+            for f in sorted(missing):
+                print(f"  - {f}")
     return 0
 
 

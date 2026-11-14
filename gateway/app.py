@@ -1,24 +1,28 @@
 """Шлюз для Pi — единственная точка входа.
 
-POST /ask    multipart: audio=<wav>, device_id=kids-room   — голосовой запрос
+POST /ask    multipart: audio=<wav>, device_id=kids-room, now_playing=<tale_id|пусто>
 POST /text   {"device_id": "...", "text": "...", "speaker": "older"} — текстом (отладка;
-             speaker — подставить профиль, пока нет узнавания по голосу)
+             speaker учитывается только с X-Admin-Token)
 POST /reset  {"device_id": "..."}                          — забыть контекст разговора
 GET  /policy                                               — текущие лимиты (Pi опрашивает раз в минуту)
 GET  /speech/<id>.wav                                      — озвученный ответ
 GET  /media/<путь>                                         — файлы сказок
+GET  /health, /livez
 
-Админка (X-Token, для Telegram-бота / веба):
+Админка (заголовок X-Admin-Token = ADMIN_TOKEN; пустой ADMIN_TOKEN — админка выключена):
 GET    /admin/status
 POST   /admin/override  {"mode": "quiet", "minutes": 60, "who": ["older"]}
-DELETE /admin/override  (?who=older)
+DELETE /admin/override  (?who=older)  — вернуть обычный режим (в т.ч. поверх расписания)
+
+Снаружи всё закрыто basic-auth в Traefik (docker-compose.traefik.yml).
+GATEWAY_TOKEN (X-Token) — необязательный второй слой для устройства.
 
 Ответ /ask и /text:
 {
   "heard": "включи колобка",
   "reply": "Включаю сказку Колобок",
-  "speech_url": "http://server:8080/speech/ab12.wav" | null,   # сначала проиграть это
-  "action": {"type": "play", "url": ".../media/kolobok.mp3", "title": "Колобок"}
+  "speech_url": "https://server/speech/ab12.wav" | null,   # сначала проиграть это
+  "action": {"type": "play", "url": ".../media/kolobok.mp3", "title": "Колобок", "tale_id": 3}
             | {"type": "stop"} | {"type": "resume"}
             | {"type": "seek", "seconds": 30, "mode": "relative" | "absolute"}
             | {"type": "volume", "level": 50} | {"type": "volume", "change": -10}
@@ -34,6 +38,7 @@ Pi:
 - раз в минуту GET /policy: если allow_playback=false — остановить; громкость > max_volume — убавить.
 """
 import contextlib
+import hmac
 import logging
 import os
 import re
@@ -61,9 +66,13 @@ AGENT_URL = os.getenv("AGENT_URL", "http://agent:8000")
 TALES_URL = os.getenv("TALES_URL", "http://tales:8000")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8080").rstrip("/")
 GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN", "")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+AGENT_HTTP_TIMEOUT = float(os.getenv("AGENT_HTTP_TIMEOUT", "40"))
+MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", "5000000"))
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "/library"))
 SPEECH_DIR = Path("/tmp/speech")
 SPEECH_TTL_SEC = 600
+FALLBACK_REPLY = "Ой, у меня что-то не получилось. Попробуй ещё раз."
 
 http: httpx.AsyncClient
 
@@ -72,19 +81,37 @@ http: httpx.AsyncClient
 async def lifespan(_app: FastAPI):
     global http
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
-    http = httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=5.0))
+    http = httpx.AsyncClient(timeout=httpx.Timeout(AGENT_HTTP_TIMEOUT, connect=5.0))
     policy.config()  # сразу проверить, что конфиг читается
+    if not ADMIN_TOKEN:
+        log.warning("ADMIN_TOKEN не задан — админка выключена")
     yield
     await http.aclose()
 
 
-app = FastAPI(title="kids-speaker gateway", lifespan=lifespan)
+app = FastAPI(title="kids-speaker gateway", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/media", StaticFiles(directory=LIBRARY_DIR, check_dir=False), name="media")
 
 
+def _same(a: str | None, b: str) -> bool:
+    return bool(a) and hmac.compare_digest(a.encode(), b.encode())
+
+
 def check_token(x_token: str | None = Header(default=None)) -> None:
-    if GATEWAY_TOKEN and x_token != GATEWAY_TOKEN:
+    if GATEWAY_TOKEN and not _same(x_token, GATEWAY_TOKEN):
         raise HTTPException(401, "bad token")
+
+
+def check_admin(x_admin_token: str | None = Header(default=None)) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(403, "admin disabled")
+    if not _same(x_admin_token, ADMIN_TOKEN):
+        raise HTTPException(401, "bad admin token")
+
+
+def is_admin(x_admin_token: str | None) -> bool:
+    return bool(ADMIN_TOKEN) and _same(x_admin_token, ADMIN_TOKEN)
 
 
 # ---------- обращения к сервисам ----------
@@ -104,14 +131,32 @@ def _cleanup_speech() -> None:
 
 
 async def synthesize(text: str) -> str | None:
+    """Озвучить ответ. Ошибка TTS не должна ронять весь ответ — тогда просто без речи."""
     if not text:
         return None
-    r = await http.post(f"{TTS_URL}/synthesize", json={"text": text})
-    r.raise_for_status()
+    try:
+        r = await http.post(f"{TTS_URL}/synthesize", json={"text": text}, timeout=30)
+        r.raise_for_status()
+    except httpx.HTTPError:
+        log.exception("TTS не ответил — отдаю ответ без речи")
+        return None
     sid = uuid.uuid4().hex
     (SPEECH_DIR / f"{sid}.wav").write_bytes(r.content)
     _cleanup_speech()
     return f"{PUBLIC_BASE_URL}/speech/{sid}.wav"
+
+
+async def get_tale(tale_id) -> dict | None:
+    try:
+        tale_id = int(tale_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        r = await http.get(f"{TALES_URL}/api/tales/{tale_id}", timeout=5)
+    except httpx.HTTPError:
+        log.exception("tales недоступен")
+        return None
+    return r.json() if r.status_code == 200 else None
 
 
 async def resolve_action(action: dict | None) -> dict | None:
@@ -119,11 +164,8 @@ async def resolve_action(action: dict | None) -> dict | None:
         return None
     if action["type"] != "play":
         return action  # stop / resume / seek / volume — как есть
-    r = await http.get(f"{TALES_URL}/api/tales/{action.get('tale_id')}")
-    if r.status_code != 200:
-        return None
-    tale = r.json()
-    if not tale.get("file"):
+    tale = await get_tale(action.get("tale_id"))
+    if not tale or not tale.get("file"):
         return None
     return {
         "type": "play",
@@ -145,7 +187,7 @@ def _say_time(dt) -> str:
     return f"{dt.hour} {dt.minute:02d}" if dt.minute else f"{dt.hour} часов"
 
 
-async def handle_parent_command(text: str) -> dict | None:
+async def handle_parent_command(text: str, can_relax: bool) -> dict | None:
     cfg = policy.config()
     cmd = parent_commands.parse(text, cfg.get("profiles") or {}, policy.now())
     if not cmd:
@@ -154,7 +196,9 @@ async def handle_parent_command(text: str) -> dict | None:
     if cmd["who"]:
         names = " для " + ", ".join(policy.profile(w).get("name", w).lower() for w in cmd["who"])
     if cmd["mode"] == "clear":
-        policy.clear_overrides(cmd["who"])
+        if not can_relax:
+            return {"reply": "Снять режим можно только с телефона."}
+        policy.relax(cmd["who"])
         return {"reply": f"Хорошо, обычный режим{names}."}
     conf = policy.mode_conf(cmd["mode"])
     until = cmd["until"] or policy.now() + timedelta(minutes=conf.get("default_minutes", 60))
@@ -163,55 +207,71 @@ async def handle_parent_command(text: str) -> dict | None:
     return {"reply": f"Хорошо. {title}{names} до {_say_time(until)}."}
 
 
-async def handle_text(device_id: str, text: str, speaker: str | None) -> dict:
-    # 1. Родитель: по голосу (когда будет) или по кодовой фразе
-    authorized = policy.is_parent(speaker)
-    rest = parent_commands.strip_passphrase(text, (policy.config().get("parent") or {})
-                                            .get("passphrase", ""))
-    if rest is not None:
-        authorized, text = True, rest or text
-    if authorized:
-        result = await handle_parent_command(text)
+async def _answer(text: str, reply: str, action: dict | None, lim: dict, **extra) -> dict:
+    return {"heard": text, "reply": reply, "speech_url": await synthesize(reply),
+            "action": action, "limits": lim, **extra}
+
+
+async def handle_text(device_id: str, text: str, speaker: str | None,
+                      now_playing: str | None = None) -> dict:
+    # 1. Команды родителя.
+    #    Проверенный родитель (speaker=parent — пока только через админ-токен) может всё.
+    #    Кодовая фраза голосом — только ужесточать режим (её могут подслушать дети),
+    #    снимать — если parent.voice_can_relax: true. К агенту такие фразы не уходят.
+    cfg = policy.config()
+    parent_cfg = cfg.get("parent") or {}
+    verified_parent = policy.is_parent(speaker)
+    rest = parent_commands.strip_passphrase(text, parent_cfg.get("passphrase", ""))
+    if rest is not None or verified_parent:
+        cmd_text = rest if rest is not None else text
+        can_relax = verified_parent or bool(parent_cfg.get("voice_can_relax", False))
+        result = await handle_parent_command(cmd_text, can_relax)
         if result:
-            res = policy.resolve(None)
-            return {"heard": text, "reply": result["reply"], "action": None,
-                    "speech_url": await synthesize(result["reply"]),
-                    "limits": policy.limits(res), "parent_command": True}
+            return await _answer(cmd_text, result["reply"], None,
+                                 policy.limits(policy.resolve(None)), parent_command=True)
+        if rest is not None:
+            return await _answer(cmd_text, "Не поняла команду.", None,
+                                 policy.limits(policy.resolve(None)), parent_command=True)
 
     # 2. Режим для этого говорящего
     res = policy.resolve(speaker)
     lim = policy.limits(res)
-    if not policy.children_allowed(res) and not authorized:
+    if not policy.children_allowed(res) and not verified_parent:
         reply = res.conf.get("message", "") if policy.announce_once(res) else ""
-        return {"heard": text, "reply": reply, "speech_url": await synthesize(reply),
-                "action": {"type": "stop"}, "limits": lim, "blocked": True}
+        return await _answer(text, reply, {"type": "stop"}, lim, blocked=True)
 
     # 3. Агент
-    r = await http.post(f"{AGENT_URL}/chat", json={
-        "device_id": device_id, "text": text,
-        "context": policy.agent_context(res, speaker),
-    })
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = await http.post(f"{AGENT_URL}/chat", json={
+            "device_id": device_id, "text": text,
+            "context": policy.agent_context(res, speaker),
+        })
+        r.raise_for_status()
+        data = r.json()
+    except (httpx.HTTPError, ValueError):
+        log.exception("агент не ответил")
+        return await _answer(text, FALLBACK_REPLY, None, lim, error="agent")
     reply = data.get("reply", "")
     action = await resolve_action(data.get("action"))
 
-    # 4. Страховка: правила режима важнее того, что решил агент
-    if action and action["type"] == "play":
-        allowed_tags = [t.lower() for t in res.conf.get("tags") or []]
-        remaining = policy.budget_remaining_sec(res)
-        if remaining is not None and remaining <= 0:
-            action, reply = None, res.conf.get("budget_message", "Пора отдыхать.")
-        elif allowed_tags and not any(t in action["tags"].lower() for t in allowed_tags):
-            action, reply = None, res.conf.get("tags_message", "Сейчас эту сказку включить нельзя.")
+    # 4. Страховка: правила режима важнее того, что решил агент —
+    #    и для новой сказки, и для «продолжай»/перемотки уже играющей.
+    if action and action["type"] in ("play", "resume", "seek") and not verified_parent:
+        if action["type"] == "play":
+            tags = action["tags"]
+        else:
+            tale = await get_tale(now_playing) if now_playing else None
+            tags = tale.get("tags", "") if tale else None
+        deny = policy.check_playback(res, tags)
+        if deny:
+            action, reply = ({"type": "stop"} if action["type"] != "play" else None), deny
         else:
             policy.start_budget(res)
             lim = policy.limits(res)  # пересчитать stop_after_sec
     if action and action["type"] == "volume" and action.get("level"):
         action["level"] = min(action["level"], lim["max_volume"])
 
-    return {"heard": text, "reply": reply, "speech_url": await synthesize(reply),
-            "action": action, "limits": lim}
+    return await _answer(text, reply, action, lim)
 
 
 # ---------- API для Pi ----------
@@ -220,6 +280,7 @@ class TextIn(BaseModel):
     device_id: str = "default"
     text: str
     speaker: str | None = None
+    now_playing: str | None = None
 
 
 class ResetIn(BaseModel):
@@ -233,15 +294,18 @@ class OverrideIn(BaseModel):
 
 
 @app.post("/ask", dependencies=[Depends(check_token)])
-async def ask(audio: UploadFile = File(...), device_id: str = Form("default")):
+async def ask(audio: UploadFile = File(...), device_id: str = Form("default"),
+              now_playing: str = Form("")):
     t0 = time.monotonic()
-    data = await audio.read()
+    data = await audio.read(MAX_AUDIO_BYTES + 1)
+    if len(data) > MAX_AUDIO_BYTES:
+        raise HTTPException(413, "audio too large")
     text = await transcribe(data, audio.filename or "audio.wav")
     t_stt = time.monotonic()
     if not text:
         return {"heard": "", "reply": "", "speech_url": None, "action": None,
                 "limits": policy.limits(policy.resolve(None))}
-    result = await handle_text(device_id, text, identify_speaker(data))
+    result = await handle_text(device_id, text, identify_speaker(data), now_playing or None)
     result["timing_ms"] = {"stt": int((t_stt - t0) * 1000),
                            "total": int((time.monotonic() - t0) * 1000)}
     log.info("ask %s: %r -> %r %s", device_id, text, result["reply"], result.get("action"))
@@ -249,9 +313,10 @@ async def ask(audio: UploadFile = File(...), device_id: str = Form("default")):
 
 
 @app.post("/text", dependencies=[Depends(check_token)])
-async def ask_text(body: TextIn):
+async def ask_text(body: TextIn, x_admin_token: str | None = Header(default=None)):
     t0 = time.monotonic()
-    result = await handle_text(body.device_id, body.text, body.speaker)
+    speaker = body.speaker if is_admin(x_admin_token) else None
+    result = await handle_text(body.device_id, body.text, speaker, body.now_playing)
     result["timing_ms"] = {"total": int((time.monotonic() - t0) * 1000)}
     return result
 
@@ -280,12 +345,12 @@ async def speech(name: str):
 
 # ---------- админка ----------
 
-@app.get("/admin/status", dependencies=[Depends(check_token)])
+@app.get("/admin/status", dependencies=[Depends(check_admin)])
 async def admin_status():
     return policy.status()
 
 
-@app.post("/admin/override", dependencies=[Depends(check_token)])
+@app.post("/admin/override", dependencies=[Depends(check_admin)])
 async def admin_override(body: OverrideIn):
     if body.mode not in (policy.config().get("modes") or {}):
         raise HTTPException(400, f"нет режима {body.mode}")
@@ -293,9 +358,17 @@ async def admin_override(body: OverrideIn):
     return policy.add_override(body.mode, policy.now() + timedelta(minutes=minutes), body.who)
 
 
-@app.delete("/admin/override", dependencies=[Depends(check_token)])
+@app.delete("/admin/override", dependencies=[Depends(check_admin)])
 async def admin_clear(who: str | None = None):
-    return {"removed": policy.clear_overrides([who] if who else None)}
+    removed = policy.relax([who] if who else None)
+    return {"removed": removed, "now": policy.status()}
+
+
+# ---------- здоровье ----------
+
+@app.get("/livez")
+async def livez():
+    return {"ok": True}
 
 
 @app.get("/health")

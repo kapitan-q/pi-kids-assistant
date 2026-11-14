@@ -65,7 +65,7 @@ arecord -d 3 -f S16_LE -r 16000 t.wav && pw-play t.wav
 ## 4. Запуск
 
 ```bash
-nano config.toml                          # адрес сервера, токен, MAC
+nano config.toml                          # адрес сервера, логин/пароль, MAC
 .venv/bin/python client.py                # вручную, видно лог
 systemctl --user start kids-speaker       # как сервис
 journalctl --user -u kids-speaker -f
@@ -88,3 +88,16 @@ journalctl --user -u kids-speaker -f
 - Нет звука из сервиса, а вручную есть → проверь `loginctl show-user $USER | grep Linger` (должно быть yes).
 - Звук заикается → кабель вместо Wi-Fi, либо USB-донгл Bluetooth.
 - Колонка срабатывает на сказку → повысь `threshold` или отодвинь микрофон от Станции.
+- Обрезаются первые слоги ответа → Bluetooth-синк засыпает в паузах. Отключи suspend:
+  ```bash
+  mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+  cat > ~/.config/wireplumber/wireplumber.conf.d/51-no-suspend.conf <<'CONF'
+  monitor.bluez.rules = [
+    { matches = [ { node.name = "~bluez_output.*" } ]
+      actions = { update-props = { session.suspend-timeout-seconds = 0 } } }
+  ]
+  CONF
+  systemctl --user restart wireplumber
+  ```
+- `401` в логе → неверные `user`/`password` в `[server]` (это basic-auth сервера на titan).
+  Проверка: `curl -u speaker:ПАРОЛЬ https://ks.dameni.org/health`.

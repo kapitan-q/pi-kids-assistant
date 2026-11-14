@@ -190,8 +190,33 @@ def upsert(title: str, author: str = "", description: str = "", tags: str = "",
                 "text=COALESCE(new.text, tales.text), id=LAST_INSERT_ID(id)",
                 (title, author, description, tags, age_min, age_max, duration_sec, file, text))
         else:
+            # без файла уникального ключа нет — ищем запись без файла с тем же названием,
+            # чтобы повторный add_tale обновлял, а не плодил дубликаты
+            cur.execute("SELECT id FROM tales WHERE file IS NULL AND title = %s LIMIT 1", (title,))
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    "UPDATE tales SET author=%s, description=%s, tags=%s, age_min=%s, age_max=%s, "
+                    "duration_sec=COALESCE(%s, duration_sec), text=COALESCE(%s, text) WHERE id=%s",
+                    (author, description, tags, age_min, age_max, duration_sec, text, row["id"]))
+                return row["id"]
             cur.execute(
                 "INSERT INTO tales (title, author, description, tags, age_min, age_max, "
                 "duration_sec, file, text) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (title, author, description, tags, age_min, age_max, duration_sec, file, text))
         return cur.lastrowid
+
+
+def files() -> dict[str, int]:
+    """file -> id для всех записей с аудио."""
+    with cursor() as cur:
+        cur.execute("SELECT id, file FROM tales WHERE file IS NOT NULL")
+        return {r["file"]: r["id"] for r in cur.fetchall()}
+
+
+def delete(ids: list[int]) -> int:
+    if not ids:
+        return 0
+    with cursor() as cur:
+        cur.execute("DELETE FROM tales WHERE id IN (" + ",".join(["%s"] * len(ids)) + ")", ids)
+        return cur.rowcount

@@ -1,6 +1,9 @@
 [server]
-url = "http://192.168.1.50:8080"   # PUBLIC_BASE_URL сервера
-token = ""                           # GATEWAY_TOKEN, если задан
+url = "https://ks.dameni.org"      # PUBLIC_BASE_URL сервера
+user = "speaker"                     # basic-auth (Traefik); пусто — без basic-auth
+password = ""
+token = ""                           # GATEWAY_TOKEN, если задан (обязателен в варианте «дома»)
+timeout = 45                         # сколько ждать ответа сервера, с
 device_id = "kids-room"
 
 [wakeword]

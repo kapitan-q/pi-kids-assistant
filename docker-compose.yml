@@ -1,96 +1,151 @@
 # Домашняя колонка-сказочница.
-# Pi ходит только в gateway (порт 8080). Остальные сервисы живут во внутренней сети compose.
+# Наружу не публикуется ни один порт. Доступ к gateway — через оверлей:
+#   docker-compose.traefik.yml — за Traefik с basic-auth (сервер titan)
+#   docker-compose.local.yml   — порт 8080 в локальной сети (вариант «дома»)
+# Нужный набор задаётся в .env через COMPOSE_FILE.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-common: &common
+  restart: unless-stopped
+  logging: *logging
 
 services:
   gateway:
+    <<: *common
     build: ./gateway
-    ports:
-      - "8080:8080"
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       STT_URL: http://stt:8000
       TTS_URL: http://tts:8000
       AGENT_URL: http://agent:8000
       TALES_URL: http://tales:8000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?укажи PUBLIC_BASE_URL в .env}
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-40}
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-5000000}
     volumes:
       - ./library:/library:ro
       - ./config:/config:ro          # policies.yaml — правится на лету
       - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
-    depends_on: [stt, tts, agent, tales]
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      stt: {condition: service_healthy}
+      tts: {condition: service_healthy}
+      agent: {condition: service_healthy}
+      tales: {condition: service_healthy}
 
   agent:
+    <<: *common
     build: ./agent
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?укажи ANTHROPIC_API_KEY в .env}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
       TALES_MCP_URL: http://tales:8000/mcp
       SESSION_IDLE_SEC: ${SESSION_IDLE_SEC:-600}
+      AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-30}
+      ALLOWED_DEVICES: ${ALLOWED_DEVICES:-}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
     volumes:
       - ./agent/system_prompt.md:/app/system_prompt.md:ro
       - ./data/logs:/data/logs
-    depends_on: [tales]
-    restart: unless-stopped
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      tales: {condition: service_healthy}
 
   stt:
+    <<: *common
     build: ./stt
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_COMPUTE: int8
       WHISPER_LANG: ru
       WHISPER_THREADS: ${WHISPER_THREADS:-4}
     volumes:
       - whisper-models:/models
-    restart: unless-stopped
+    cpus: ${STT_CPUS:-4}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3))['ok']"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 600s   # первый старт качает модель Whisper
 
   tts:
+    <<: *common
     build: ./tts
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       PIPER_VOICE: ${PIPER_VOICE:-ru_RU-irina-medium}
       PIPER_LENGTH_SCALE: ${PIPER_LENGTH_SCALE:-1.1}
     volumes:
       - piper-voices:/voices
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3))['ok']"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s   # первый старт качает голос Piper
 
   tales:
+    <<: *common
     build: ./tales
-    # MCP наружу — чтобы подключить библиотеку к Claude Code / Desktop на своём ПК.
-    # Если не нужно — закомментируй ports.
-    ports:
-      - "8090:8000"
+    # MCP (/mcp) доступен только внутри compose-сети — наружу не публикуется.
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       MYSQL_HOST: mysql
       MYSQL_DATABASE: tales
       MYSQL_USER: tales
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tales}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?укажи MYSQL_PASSWORD в .env}
     volumes:
       - ./library:/library
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     depends_on:
       mysql:
         condition: service_healthy
-    restart: unless-stopped
 
   mysql:
+    <<: *common
     image: mysql:8.4
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
-    # Порт наружу — чтобы смотреть базу из DBeaver/DataGrip. Не нужно — закомментируй.
-    ports:
-      - "3307:3306"
+    # Порт не публикуется. Консоль: docker compose exec mysql mysql -utales -p tales
     environment:
+      TZ: ${TZ:-Europe/Belgrade}
       MYSQL_DATABASE: tales
       MYSQL_USER: tales
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tales}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?укажи MYSQL_PASSWORD в .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?укажи MYSQL_ROOT_PASSWORD в .env}
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      # пароль берётся из окружения контейнера, а не из командной строки
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -uroot"]
       interval: 5s
       timeout: 3s
       retries: 30
-    restart: unless-stopped
 
 volumes:
   mysql-data:

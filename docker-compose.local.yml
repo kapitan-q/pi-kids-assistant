@@ -1,0 +1,7 @@
+# Вариант «дома»: gateway на порту 8080 в локальной сети, без Traefik.
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml
+# Basic-auth здесь нет — задай GATEWAY_TOKEN, клиент шлёт его в X-Token.
+services:
+  gateway:
+    ports:
+      - "${LOCAL_BIND:-0.0.0.0}:8080:8080"
