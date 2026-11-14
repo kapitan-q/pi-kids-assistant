@@ -23,6 +23,7 @@ def test_validate_play():
     {**PLAY, "path": "https://evil.example/x.mp3"},       # абсолютный url
     {**PLAY, "path": "stream/../../etc/passwd"},
     {**PLAY, "path": None},
+    {**PLAY, "path": "mcp"},                              # не файл плеера
     {"type": "explode"},
     {"type": "volume"},                                   # ни level, ни change
     {"type": "volume", "level": 500},

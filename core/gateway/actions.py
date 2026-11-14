@@ -29,8 +29,8 @@ class PlayerAction(BaseModel):
     @field_validator("path")
     @classmethod
     def _relative_path(cls, v):
-        if v is not None and (not re.fullmatch(r"[\w][\w./-]*", v) or ".." in v):
-            raise ValueError("path должен быть относительным, без ..")
+        if v is not None and (not re.fullmatch(r"stream/[\w./-]+", v) or ".." in v):
+            raise ValueError("path — файл плеера модуля: stream/…, без ..")
         return v
 
     @field_validator("tags")

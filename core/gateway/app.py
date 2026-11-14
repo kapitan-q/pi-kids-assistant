@@ -414,7 +414,8 @@ PROXY_HEADERS = ("content-type", "content-length", "content-range", "accept-rang
 async def module_files(module: str, path: str, request: Request):
     """Файлы модулей для плеера. За Traefik /m/<модуль> уходит в модуль напрямую — это для режима «дома»."""
     base = modules.base_url(module)
-    if not base or ".." in path or not re.fullmatch(r"[\w./-]+", path):
+    # только файлы плеера: MCP и прочее у модуля наружу не отдаём
+    if not base or ".." in path or not re.fullmatch(r"stream/[\w./-]+", path):
         raise HTTPException(404)
     headers = {h: v for h, v in request.headers.items() if h.lower() in ("range", "if-range")}
     upstream = http.build_request(request.method, f"{base}/{path}", headers=headers,
