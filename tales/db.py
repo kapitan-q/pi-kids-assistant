@@ -95,10 +95,24 @@ def _stem(word: str) -> str:
     return w
 
 
+# Короткие служебные слова — не ищем. Остальные двухбуквенные («ёж», «уж») — ищем.
+SHORT_STOPWORDS = {"на", "по", "не", "ну", "он", "мы", "вы", "ты", "же", "ли", "бы", "из", "за",
+                   "от", "до", "со", "во", "ко", "то", "да", "их", "ее", "ей", "им", "но", "а", "и",
+                   "в", "с", "к", "у", "о", "я"}
+
+
 def stems_of(query: str) -> list[str]:
     words = re.findall(r"[\w-]+", query.lower().replace("ё", "е"))
-    stems = [_stem(w).replace("-", "") for w in words if w not in STOPWORDS]
-    return list(dict.fromkeys(s for s in stems if len(s) >= 3))
+    out = []
+    for w in words:
+        if w in STOPWORDS or w in SHORT_STOPWORDS:
+            continue
+        s = _stem(w).replace("-", "")
+        out.append(s)
+        # уменьшительные: «ежик» → «еж», «волчок» → «волч», «зайчик» → «зайч»
+        if len(s) >= 4 and s[-2:] in ("ик", "ок", "ек"):
+            out.append(s[:-2])
+    return list(dict.fromkeys(s for s in out if len(s) >= 2))
 
 
 def build_ft_query(query: str) -> str | None:
