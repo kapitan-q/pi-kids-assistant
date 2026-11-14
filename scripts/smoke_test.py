@@ -66,10 +66,10 @@ def section(title):
 # ---------------------------------------------------------------- доступ
 section("Доступ")
 check("без пароля — 401", call("GET", "/health", auth=False)[0] == 401)
-check("админка без токена — 401", call("GET", "/admin/status")[0] == 401)
+check("админка без токена — 401", call("GET", "/control/status")[0] == 401)
 st, h = call("GET", "/health")
 check(f"все сервисы живы {h and h.get('services')}", st == 200 and h["ok"])
-call("DELETE", "/admin/override", admin=True)          # обычный режим, даже если по расписанию ночь
+call("DELETE", "/control/override", admin=True)          # обычный режим, даже если по расписанию ночь
 call("POST", "/reset", {"device_id": DEVICE})
 
 # ---------------------------------------------------------------- обычный режим
@@ -104,6 +104,11 @@ check("«громкость пятьдесят» → volume level 50", kind(d) =
 d = say("включи сказку о рыбаке и рыбке")
 rybka_id = (d.get("action") or {}).get("tale_id")
 check("«о рыбаке и рыбке» → play", kind(d) == "play" and "рыб" in (d.get("action") or {}).get("title", "").lower(), d)
+call("POST", "/progress", {"tale_id": rybka_id, "position": 300})      # «остановились» на 5-й минуте
+d = say("включи сказку о рыбаке и рыбке")
+a = d.get("action") or {}
+check("повторно — продолжает с того места (start ≈ 300)", kind(d) == "play" and 290 <= (a.get("start") or 0) <= 310, d)
+call("POST", "/progress", {"tale_id": rybka_id, "position": 0})        # вернуть в начало
 d = say("почему небо голубое?")
 check("вопрос «почему небо голубое» → ответ без команды", kind(d) is None and len(d.get("reply", "")) > 10, d)
 d = say("включи любую сказку")
@@ -120,7 +125,7 @@ check("сложная фраза уходит к Claude", not d.get("quick") and
 
 # ---------------------------------------------------------------- ночь
 section("Ночной режим (команда админки)")
-call("POST", "/admin/override", {"mode": "night", "minutes": 10}, admin=True)
+call("POST", "/control/override", {"mode": "night", "minutes": 10}, admin=True)
 call("POST", "/reset", {"device_id": DEVICE})
 d = say("включи сказку про рыбака и рыбку")
 a = d.get("action") or {}
@@ -137,7 +142,7 @@ check("ночью «продолжай» не-ночную сказку → stop
 
 # ---------------------------------------------------------------- тихий час
 section("Тихий час")
-call("POST", "/admin/override", {"mode": "quiet", "minutes": 10}, admin=True)
+call("POST", "/control/override", {"mode": "quiet", "minutes": 10}, admin=True)
 d = say("включи мойдодыра")
 check("в тихий час → blocked + stop + сообщение", d.get("blocked") and kind(d) == "stop" and d.get("reply"), d)
 d = say("ну пожалуйста включи")
@@ -147,13 +152,13 @@ check("кодовая фраза не обходит блок", kind(d) is None 
 
 # ---------------------------------------------------------------- родитель
 section("Родительские команды голосом")
-call("DELETE", "/admin/override", admin=True)
+call("DELETE", "/control/override", admin=True)
 d = say("Капитан Немо, тихий час на сорок пять минут")
 check("«…тихий час на сорок пять минут» → режим включён", d.get("parent_command") and d["limits"]["mode"] == "quiet", d)
 d = say("Капитан Немо, отбой тишины")
 check("снять голосом нельзя (voice_can_relax: false)", "телефон" in d.get("reply", "") and d["limits"]["mode"] == "quiet", d)
 
-call("DELETE", "/admin/override", admin=True)
+call("DELETE", "/control/override", admin=True)
 call("POST", "/reset", {"device_id": DEVICE})
 failed = [n for ok, n in results if not ok]
 print(f"\nИтого: {len(results) - len(failed)}/{len(results)} OK" + ("" if not failed else "\nНе прошло:\n  - " + "\n  - ".join(failed)))

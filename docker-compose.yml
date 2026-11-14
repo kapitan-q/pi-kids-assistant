@@ -34,6 +34,7 @@ services:
       - ./library:/library:ro
       - ./config:/config:ro          # policies.yaml — правится на лету
       - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
+      - ./data/merged:/merged:ro     # склеенные книги (готовит tales)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
       interval: 30s
@@ -115,13 +116,14 @@ services:
     # MCP (/mcp) доступен только внутри compose-сети — наружу не публикуется.
     environment:
       TZ: ${TZ:-Europe/Belgrade}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
-      MYSQL_HOST: mysql
-      MYSQL_DATABASE: tales
-      MYSQL_USER: tales
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?укажи MYSQL_PASSWORD в .env}
+      ABS_URL: http://audiobookshelf
+      ABS_API_KEY: ${ABS_API_KEY:-}            # ключ пользователя speaker (scripts/abs_setup.py)
+      ABS_LIBRARY_ID: ${ABS_LIBRARY_ID:-}
+      CATALOG_REFRESH_SEC: ${CATALOG_REFRESH_SEC:-300}
     volumes:
-      - ./library:/library
+      - ./library:/library:ro        # та же папка, что /audiobooks у Audiobookshelf
+      - ./data/merged:/data/merged   # склеенные многофайловые книги
+      - ./data/tales:/data           # сколько раз слушали (для случайной сказки)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
@@ -129,30 +131,28 @@ services:
       retries: 3
       start_period: 60s
     depends_on:
-      mysql:
-        condition: service_healthy
+      audiobookshelf: {condition: service_healthy}
 
-  mysql:
+  audiobookshelf:
     <<: *common
-    image: mysql:8.4
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
-    # Порт не публикуется. Консоль: docker compose exec mysql mysql -utales -p tales
+    image: ghcr.io/advplyr/audiobookshelf:2.37.2
+    # Каталог сказок. Веб-интерфейс: $PUBLIC_BASE_URL/audiobookshelf/ (/admin — редирект туда),
+    # вход по логину Audiobookshelf. Порт наружу не публикуется.
     environment:
       TZ: ${TZ:-Europe/Belgrade}
-      MYSQL_DATABASE: tales
-      MYSQL_USER: tales
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?укажи MYSQL_PASSWORD в .env}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?укажи MYSQL_ROOT_PASSWORD в .env}
     volumes:
-      - mysql-data:/var/lib/mysql
+      - ./library:/audiobooks        # сюда же попадают книги, загруженные через интерфейс
+      - abs-config:/config           # база Audiobookshelf (sqlite), пользователи, прогресс
+      - abs-metadata:/metadata       # обложки, кэш
     healthcheck:
-      # пароль берётся из окружения контейнера, а не из командной строки
-      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -uroot"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthcheck >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
-  mysql-data:
+  abs-config:
+  abs-metadata:
   whisper-models:
   piper-voices:

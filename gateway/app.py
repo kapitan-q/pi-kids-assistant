@@ -9,10 +9,10 @@ GET  /speech/<id>.wav                                      — озвученн�
 GET  /media/<путь>                                         — файлы сказок
 GET  /health, /livez
 
-Админка (заголовок X-Admin-Token = ADMIN_TOKEN; пустой ADMIN_TOKEN — админка выключена):
-GET    /admin/status
-POST   /admin/override  {"mode": "quiet", "minutes": 60, "who": ["older"]}
-DELETE /admin/override  (?who=older)  — вернуть обычный режим (в т.ч. поверх расписания)
+Управление (заголовок X-Admin-Token = ADMIN_TOKEN; пустой ADMIN_TOKEN — админка выключена):
+GET    /control/status
+POST   /control/override  {"mode": "quiet", "minutes": 60, "who": ["older"]}
+DELETE /control/override  (?who=older)  — вернуть обычный режим (в т.ч. поверх расписания)
 
 Снаружи всё закрыто basic-auth в Traefik (docker-compose.traefik.yml).
 GATEWAY_TOKEN (X-Token) — необязательный второй слой для устройства.
@@ -72,6 +72,7 @@ AGENT_HTTP_TIMEOUT = float(os.getenv("AGENT_HTTP_TIMEOUT", "40"))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", "5000000"))
 QUICK_COMMANDS = os.getenv("QUICK_COMMANDS", "1") not in ("0", "false", "no")
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "/library"))
+MERGED_DIR = Path(os.getenv("MERGED_DIR", "/merged"))   # склеенные многофайловые книги
 SPEECH_DIR = Path("/tmp/speech")
 SPEECH_TTL_SEC = 600
 FALLBACK_REPLY = "Ой, у меня что-то не получилось. Попробуй ещё раз."
@@ -94,6 +95,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="kids-speaker gateway", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/media", StaticFiles(directory=LIBRARY_DIR, check_dir=False), name="media")
+app.mount("/merged", StaticFiles(directory=MERGED_DIR, check_dir=False), name="merged")
 
 
 def _same(a: str | None, b: str) -> bool:
@@ -148,13 +150,13 @@ async def synthesize(text: str) -> str | None:
     return f"{PUBLIC_BASE_URL}/speech/{sid}.wav"
 
 
-async def get_tale(tale_id) -> dict | None:
-    try:
-        tale_id = int(tale_id)
-    except (TypeError, ValueError):
+async def get_tale(tale_id, with_resume: bool = False) -> dict | None:
+    """Сказка из каталога (id — строковый id книги в Audiobookshelf)."""
+    if not tale_id or not re.fullmatch(r"[\w-]{1,64}", str(tale_id)):
         return None
     try:
-        r = await http.get(f"{TALES_URL}/api/tales/{tale_id}", timeout=5)
+        r = await http.get(f"{TALES_URL}/api/tales/{tale_id}", timeout=10,
+                           params={"with_resume": "true"} if with_resume else None)
     except httpx.HTTPError:
         log.exception("tales недоступен")
         return None
@@ -166,16 +168,30 @@ async def resolve_action(action: dict | None) -> dict | None:
         return None
     if action["type"] != "play":
         return action  # stop / resume / seek / volume — как есть
-    tale = await get_tale(action.get("tale_id"))
-    if not tale or not tale.get("file"):
+    tale = await get_tale(action.get("tale_id"), with_resume=True)
+    if not tale or not tale.get("media_path"):
         return None
-    return {
+    act = {
         "type": "play",
         "tale_id": tale["id"],
         "title": tale["title"],
         "tags": tale.get("tags", ""),
-        "url": f"{PUBLIC_BASE_URL}/media/{quote(tale['file'])}",
+        "url": f"{PUBLIC_BASE_URL}/{quote(tale['media_path'])}",
     }
+    if tale.get("resume_from"):
+        act["start"] = tale["resume_from"]   # продолжить с того места, где остановились
+    return act
+
+
+async def save_progress(tale_id: str | None, position: float | None, finished: bool = False) -> None:
+    """Позиция прослушивания → Audiobookshelf (через tales). Ошибки не мешают ответу."""
+    if not tale_id or position is None:
+        return
+    try:
+        await http.post(f"{TALES_URL}/api/progress", timeout=10,
+                        json={"tale_id": str(tale_id), "position": position, "finished": finished})
+    except httpx.HTTPError:
+        log.warning("не удалось сохранить позицию %s", tale_id)
 
 
 def identify_speaker(_audio: bytes) -> str | None:
@@ -305,10 +321,20 @@ class OverrideIn(BaseModel):
     who: list[str] | None = None
 
 
+class ProgressIn(BaseModel):
+    device_id: str = "default"
+    tale_id: str
+    position: float
+    finished: bool = False
+
+
 @app.post("/ask", dependencies=[Depends(check_token)])
 async def ask(audio: UploadFile = File(...), device_id: str = Form("default"),
-              now_playing: str = Form("")):
+              now_playing: str = Form(""), position: str = Form("")):
     t0 = time.monotonic()
+    if now_playing and position:   # заодно запомнить, где остановились
+        with contextlib.suppress(ValueError):
+            await save_progress(now_playing, float(position))
     data = await audio.read(MAX_AUDIO_BYTES + 1)
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
@@ -340,6 +366,13 @@ async def reset(body: ResetIn):
     return {"ok": True}
 
 
+@app.post("/progress", dependencies=[Depends(check_token)])
+async def progress(body: ProgressIn):
+    """Pi раз в полминуты и при остановке сообщает позицию — чтобы потом продолжить с того места."""
+    await save_progress(body.tale_id, body.position, body.finished)
+    return {"ok": True}
+
+
 @app.get("/policy", dependencies=[Depends(check_token)])
 async def get_policy():
     return policy.limits(policy.resolve(None))
@@ -357,12 +390,12 @@ async def speech(name: str):
 
 # ---------- админка ----------
 
-@app.get("/admin/status", dependencies=[Depends(check_admin)])
+@app.get("/control/status", dependencies=[Depends(check_admin)])
 async def admin_status():
     return policy.status()
 
 
-@app.post("/admin/override", dependencies=[Depends(check_admin)])
+@app.post("/control/override", dependencies=[Depends(check_admin)])
 async def admin_override(body: OverrideIn):
     if body.mode not in (policy.config().get("modes") or {}):
         raise HTTPException(400, f"нет режима {body.mode}")
@@ -370,7 +403,7 @@ async def admin_override(body: OverrideIn):
     return policy.add_override(body.mode, policy.now() + timedelta(minutes=minutes), body.who)
 
 
-@app.delete("/admin/override", dependencies=[Depends(check_admin)])
+@app.delete("/control/override", dependencies=[Depends(check_admin)])
 async def admin_clear(who: str | None = None):
     removed = policy.relax([who] if who else None)
     return {"removed": removed, "now": policy.status()}

@@ -145,8 +145,13 @@ class TalePlayer:
             time.sleep(0.1)
         self.lock = threading.Lock()
         self.stop_at: float | None = None   # monotonic-время автостопа
-        self.tale_id: int | None = None     # что сейчас загружено — сервер проверяет правила при «продолжай»
+        self.tale_id: str | None = None     # что сейчас загружено — сервер проверяет правила при «продолжай»
         self.fade_sec = float(CFG["player"].get("fade_sec", 20))
+        # позиция для «продолжить с того места»: (tale_id, секунда, дослушано) → сервер
+        self.on_progress = lambda tale_id, position, finished: None
+        self.position: float | None = None
+        self.duration: float | None = None
+        self.last_report = 0.0
 
     def cmd(self, *args):
         """Отправить команду и дождаться ответа (строки с полем "error")."""
@@ -180,12 +185,38 @@ class TalePlayer:
     def playing(self) -> bool:
         return self.loaded() and not self.get("pause")
 
-    def play(self, url: str, stop_after_sec: int | None, tale_id: int | None = None) -> None:
-        self.tale_id = tale_id
+    def play(self, url: str, stop_after_sec: int | None, tale_id: str | None = None,
+             start: float | None = None) -> None:
+        self.report()                       # прежняя сказка — запомнить, где остановились
+        self.tale_id, self.position, self.duration = tale_id, None, None
         self.cmd("set_property", "volume", 100)
-        self.cmd("loadfile", url, "replace")
+        if start:
+            # продолжить с места: загрузить на паузе, дождаться длительности и перемотать.
+            # Так работает на любой версии mpv (синтаксис опций loadfile менялся).
+            self.cmd("set_property", "pause", True)
+            self.cmd("loadfile", url, "replace")
+            for _ in range(50):
+                if self.get("duration"):
+                    break
+                time.sleep(0.1)
+            self.cmd("seek", float(start), "absolute")
+            log.info("продолжаю с %d:%02d", int(start) // 60, int(start) % 60)
+        else:
+            self.cmd("loadfile", url, "replace")
         self.cmd("set_property", "pause", False)
         self.set_timer(stop_after_sec)
+        self.last_report = time.monotonic()
+
+    def report(self, finished: bool = False) -> None:
+        """Сообщить серверу позицию текущей сказки (для «продолжи с того места»)."""
+        if not self.tale_id:
+            return
+        pos = self.get("time-pos") if not finished else (self.duration or self.position)
+        if pos is None:
+            pos = self.position
+        if pos is not None:
+            self.on_progress(self.tale_id, float(pos), finished)
+        self.last_report = time.monotonic()
 
     def pause(self) -> None:
         self.cmd("set_property", "pause", True)
@@ -195,6 +226,7 @@ class TalePlayer:
             self.cmd("set_property", "pause", False)
 
     def stop(self) -> None:
+        self.report()
         self.cmd("stop")
         self.cmd("set_property", "volume", 100)
         self.stop_at = None
@@ -210,7 +242,24 @@ class TalePlayer:
             log.info("таймер сна: %s мин", round(sec / 60))
 
     def tick(self) -> None:
-        """Вызывается часто: плавно гасим звук перед автостопом."""
+        """Вызывается часто: следим за позицией, плавно гасим звук перед автостопом."""
+        if self.tale_id:
+            if self.get("idle-active"):
+                if self.position is None and time.monotonic() - self.last_report < 15:
+                    pass  # файл ещё грузится — сразу после loadfile mpv какое-то время «idle»
+                else:
+                    # сказка доиграла до конца — отметить дослушанной
+                    if self.position and self.duration and self.position > self.duration - 30:
+                        self.report(finished=True)
+                    self.tale_id = None
+            else:
+                pos, dur = self.get("time-pos"), self.get("duration")
+                if pos is not None:
+                    self.position = pos
+                if dur:
+                    self.duration = dur
+                if not self.get("pause") and time.monotonic() - self.last_report > 30:
+                    self.report()
         if self.stop_at is None:
             return
         left = self.stop_at - time.monotonic()
@@ -228,6 +277,7 @@ class Client:
         self.audio: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self.volume = Volume()
         self.player = TalePlayer()
+        self.player.on_progress = self.report_progress
         self.vad = webrtcvad.Vad(int(CFG["audio"].get("vad_aggressiveness", 2)))
         ww = CFG["wakeword"]
         self.threshold = float(ww.get("threshold", 0.5))
@@ -302,11 +352,24 @@ class Client:
         buf = io.BytesIO()
         write_wav(buf, samples)
         now_playing = self.player.tale_id if self.player.loaded() else None
+        position = self.player.get("time-pos") if now_playing else None
         r = requests.post(f"{SERVER}/ask", headers=HEADERS, auth=AUTH, timeout=ASK_TIMEOUT,
                           files={"audio": ("q.wav", buf.getvalue(), "audio/wav")},
-                          data={"device_id": DEVICE_ID, "now_playing": now_playing or ""})
+                          data={"device_id": DEVICE_ID, "now_playing": now_playing or "",
+                                "position": "" if position is None else f"{position:.1f}"})
         r.raise_for_status()
         return r.json()
+
+    def report_progress(self, tale_id: str, position: float, finished: bool) -> None:
+        """Позицию — на сервер в фоне: сеть не должна тормозить плеер."""
+        def send():
+            try:
+                requests.post(f"{SERVER}/progress", headers=HEADERS, auth=AUTH, timeout=10,
+                              json={"device_id": DEVICE_ID, "tale_id": tale_id,
+                                    "position": round(position, 1), "finished": finished})
+            except Exception as e:  # noqa: BLE001
+                log.warning("позиция не сохранена: %s", e)
+        threading.Thread(target=send, daemon=True).start()
 
     def apply_limits(self, lim: dict | None) -> None:
         if not lim:
@@ -325,7 +388,7 @@ class Client:
         kind = act.get("type")
         log.info("действие: %s", act)
         if kind == "play":
-            self.player.play(act["url"], (lim or {}).get("stop_after_sec"), act.get("tale_id"))
+            self.player.play(act["url"], (lim or {}).get("stop_after_sec"), act.get("tale_id"), act.get("start"))
         elif kind == "stop":
             self.player.stop()
         elif kind == "resume":

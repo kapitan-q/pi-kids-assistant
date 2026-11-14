@@ -68,19 +68,20 @@ ACTION_TOOLS = {
 FALLBACK_REPLY = "Ой, у меня что-то не получилось. Попробуй ещё раз."
 
 
-def tale_id_from_result(content) -> int | None:
-    """play_random_tale сам выбирает сказку — её id есть только в результате инструмента."""
+def tale_id_from_result(content) -> str | None:
+    """play_random_tale сам выбирает сказку — её id есть только в результате инструмента.
+    id — строковый id книги в Audiobookshelf."""
     if isinstance(content, list):
         content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
     text = str(content or "")
     try:
         data = json.loads(text)
         if isinstance(data, dict) and data.get("tale_id") is not None:
-            return int(data["tale_id"])
+            return str(data["tale_id"])
     except (ValueError, TypeError):
         pass
-    m = re.search(r'"tale_id"\s*:\s*(\d+)', text)
-    return int(m.group(1)) if m else None
+    m = re.search(r'"tale_id"\s*:\s*"?([\w-]+)"?', text)
+    return m.group(1) if m else None
 
 
 def volume_action(tool_input: dict) -> dict:
@@ -223,7 +224,7 @@ async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
                         if kind == "volume":
                             act = volume_action(block.input)
                         elif kind == "play":
-                            act["tale_id"] = block.input.get("tale_id")
+                            act["tale_id"] = str(block.input["tale_id"]) if block.input.get("tale_id") is not None else None
                         elif kind == "seek":
                             act["seconds"] = int(block.input.get("seconds", 30))
                             act["mode"] = block.input.get("mode", "relative")

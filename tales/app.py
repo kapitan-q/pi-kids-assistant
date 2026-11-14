@@ -1,14 +1,25 @@
-"""Сервис сказок: MCP-сервер (/mcp) + небольшой REST для шлюза (/api/...)."""
+"""Сервис сказок: MCP для агента (/mcp) + REST для шлюза (/api/...), каталог — Audiobookshelf.
+
+Инструменты для детского агента те же, что и раньше; id сказки — строковый id книги в ABS.
+Пополнять библиотеку — через веб-интерфейс Audiobookshelf (ks.dameni.org/admin).
+"""
 import contextlib
+import logging
+import threading
+import time
 
 from fastapi import FastAPI, HTTPException
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
 
-import db
+from catalog import REFRESH_SEC, catalog
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("tales")
 
 # host="0.0.0.0" отключает защиту от DNS-rebinding, которая по умолчанию
 # пускает только Host: localhost — иначе agent не достучится по имени "tales".
-# Поэтому порт tales НЕ публикуется наружу: MCP (с add_tale) доступен только внутри compose-сети.
+# Поэтому порт tales НЕ публикуется наружу: MCP доступен только внутри compose-сети.
 mcp = FastMCP("tales", host="0.0.0.0", stateless_http=True, json_response=True)
 
 
@@ -21,7 +32,7 @@ def search_tales(query: str = "", age: int | None = None,
     query — ключевые слова в начальной форме: герои, название, автор, тема
     (например «колобок», «лиса заяц», «Пушкин», «про космос»). Пустой query — популярные.
     age — возраст слушателя, max_minutes — ограничение по длительности."""
-    return db.search(query, age, max_minutes, limit)
+    return catalog.search(query, age, max_minutes, limit)
 
 
 @mcp.tool()
@@ -30,39 +41,43 @@ def play_random_tale(tag: str = "", age: int | None = None,
     """Выбрать случайную сказку и СРАЗУ включить её на колонке (одним вызовом, play_tale не нужен).
     Для «любую», «какую-нибудь», «на ночь», «другую». Можно ограничить тегом (см. list_tags),
     возрастом и длительностью. Реже слушанные выпадают чаще."""
-    tale = db.random_tale(tag or None, age, max_minutes)
+    tale = catalog.random(tag or None, age, max_minutes)
     if not tale:
         raise ValueError("Подходящих сказок не нашлось")
-    db.mark_played(tale["id"])
+    catalog.plays.inc(tale["id"])
     return {"ok": True, "tale_id": tale["id"], "playing": tale["title"],
-            "description": tale.get("description", "")}
+            "description": tale["description"]}
 
 
 @mcp.tool()
 def list_tags() -> list[str]:
     """Все теги библиотеки (темы сказок)."""
-    return db.list_tags()
+    return catalog.list_tags()
 
 
 @mcp.tool()
-def get_tale(tale_id: int) -> dict:
+def get_tale(tale_id: str) -> dict:
     """Подробности о сказке по id (описание, автор, длительность)."""
-    tale = db.get(tale_id)
+    tale = catalog.get(tale_id)
     if not tale:
         raise ValueError(f"Сказки с id={tale_id} нет")
-    return tale
+    return catalog.public(tale)
 
 
 @mcp.tool()
-def play_tale(tale_id: int) -> dict:
-    """Включить сказку на колонке. Вызывай, когда понятно, какую сказку хотят."""
-    tale = db.get(tale_id)
+def play_tale(tale_id: str) -> dict:
+    """Включить сказку на колонке. Вызывай, когда понятно, какую сказку хотят.
+    Если сказку уже начинали слушать, она продолжится с того места (resume_from_min)."""
+    tale = catalog.get(tale_id)
     if not tale:
         raise ValueError(f"Сказки с id={tale_id} нет")
-    if not tale["has_audio"]:
-        raise ValueError(f"У сказки «{tale['title']}» пока нет аудио")
-    db.mark_played(tale_id)
-    return {"ok": True, "playing": tale["title"]}
+    if not catalog.media_path(tale):
+        raise ValueError(f"Сказка «{tale['title']}» ещё готовится, попробуй чуть позже")
+    catalog.plays.inc(tale["id"])
+    result = {"ok": True, "playing": tale["title"]}
+    if (start := catalog.resume_from(tale)) is not None:
+        result["resume_from_min"] = round(start / 60)
+    return result
 
 
 @mcp.tool()
@@ -103,23 +118,21 @@ def set_volume(level: int | None = None, change: int | None = None) -> str:
     return "Готово"
 
 
-# ---------- инструмент для взрослых (Claude Code / Desktop), детскому агенту не выдаётся ----------
-
-@mcp.tool()
-def add_tale(title: str, author: str = "", description: str = "", tags: str = "",
-             age_min: int | None = None, age_max: int | None = None,
-             file: str | None = None, text: str | None = None) -> dict:
-    """Добавить или обновить сказку. file — путь к аудио относительно папки library
-    (например «народные/kolobok.mp3»). tags — через запятую."""
-    tale_id = db.upsert(title, author, description, tags, age_min, age_max, None, file, text)
-    return {"ok": True, "id": tale_id}
-
-
 # ---------- FastAPI-обёртка ----------
+
+def _refresh_loop() -> None:
+    """Каталог обновляется фоном: новые книги из Audiobookshelf появляются за REFRESH_SEC."""
+    while True:
+        try:
+            catalog.refresh()
+        except Exception:  # noqa: BLE001
+            log.exception("обновление каталога не удалось")
+        time.sleep(max(60, REFRESH_SEC))
+
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
-    db.init()
+    threading.Thread(target=_refresh_loop, daemon=True).start()
     async with mcp.session_manager.run():
         yield
 
@@ -128,22 +141,48 @@ mcp_app = mcp.streamable_http_app()  # создаёт session_manager, endpoint 
 app = FastAPI(title="tales", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+class ProgressIn(BaseModel):
+    tale_id: str
+    position: float
+    finished: bool = False
+
+
 @app.get("/health")
 def health():
-    return {"ok": True}
+    # ok — сервис жив; пустой каталог (ABS ещё не настроен) не должен валить всю колонку
+    return {"ok": True, "catalog_loaded": catalog.loaded_at > 0,
+            "tales": len(catalog.tales), "skipped": len(catalog.skipped)}
 
 
 @app.get("/api/tales/{tale_id}")
-def api_get(tale_id: int):
-    tale = db.get(tale_id)
+def api_get(tale_id: str, with_resume: bool = False):
+    tale = catalog.get(tale_id)
     if not tale:
         raise HTTPException(404, "not found")
-    return tale
+    d = catalog.public(tale)
+    d["media_path"] = catalog.media_path(tale)
+    if with_resume:
+        d["resume_from"] = catalog.resume_from(tale)
+    return d
 
 
 @app.get("/api/tales")
 def api_search(q: str = "", limit: int = 20):
-    return db.search(q, limit=limit)
+    return catalog.search(q, limit=limit)
+
+
+@app.post("/api/progress")
+def api_progress(body: ProgressIn):
+    if not catalog.get(body.tale_id):
+        raise HTTPException(404, "not found")
+    catalog.save_progress(body.tale_id, body.position, body.finished)
+    return {"ok": True}
+
+
+@app.post("/api/refresh")
+def api_refresh():
+    catalog.refresh()
+    return {"tales": len(catalog.tales), "skipped": catalog.skipped}
 
 
 # монтируем последним, чтобы маршруты выше имели приоритет
