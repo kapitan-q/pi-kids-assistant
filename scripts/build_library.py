@@ -39,7 +39,7 @@ def main() -> int:
     script, work = [], Path(tempfile.mkdtemp(prefix="ks-build-", dir=ROOT / "library"))
     copied = concat = 0
     for t in tales:
-        paths = [incoming / p for p in t["paths"]]
+        paths = [incoming / p.replace("\\", "/") for p in t["paths"]]  # манифест мог прийти с Windows
         missing = [str(p) for p in paths if not p.is_file()]
         if missing:
             print(f"!! {t['slug']}: нет файлов {missing}")
