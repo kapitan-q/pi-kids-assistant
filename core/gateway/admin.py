@@ -4,15 +4,15 @@
 так одинаково за Traefik и в режиме «дома». Пароль колонки сюда не подходит.
 Профили создаются только знакомством голосом с колонки.
 """
+import base64
 import hmac
 import logging
 import os
 from pathlib import Path
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
 import modules
@@ -25,17 +25,36 @@ ADMIN_USER = os.getenv("ADMIN_USER", "parent")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "").encode()
 PAGE = Path(__file__).with_name("admin") / "index.html"
 
-basic = HTTPBasic(realm="kids-speaker admin")
+CHALLENGE = {"WWW-Authenticate": 'Basic realm="kids-speaker admin", charset="UTF-8"'}
 
 
-def check_parent(cred: HTTPBasicCredentials = Depends(basic)) -> None:
-    ok_user = hmac.compare_digest(cred.username.encode(), ADMIN_USER.encode())
+def _credentials(header: str | None) -> tuple[str, str] | None:
+    """Basic-auth в UTF-8 (HTTPBasic из FastAPI понимает только ASCII — кириллический пароль не прошёл бы)."""
+    if not header or not header.lower().startswith("basic "):
+        return None
     try:
-        ok_pw = bool(ADMIN_PASSWORD_HASH) and bcrypt.checkpw(cred.password.encode(), ADMIN_PASSWORD_HASH)
+        raw = base64.b64decode(header[6:].strip(), validate=True)
     except ValueError:
-        ok_pw = False
-    if not (ok_user and ok_pw):
-        raise HTTPException(401, "bad credentials", headers={"WWW-Authenticate": 'Basic realm="kids-speaker admin"'})
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    user, sep, pw = text.partition(":")
+    return (user, pw) if sep else None
+
+
+def check_parent(authorization: str | None = Header(default=None)) -> None:
+    cred = _credentials(authorization)
+    ok = False
+    if cred and ADMIN_PASSWORD_HASH:
+        ok_user = hmac.compare_digest(cred[0].encode(), ADMIN_USER.encode())
+        try:
+            ok = bcrypt.checkpw(cred[1].encode(), ADMIN_PASSWORD_HASH) and ok_user
+        except ValueError:
+            ok = False
+    if not ok:
+        raise HTTPException(401, "bad credentials", headers=CHALLENGE)
 
 
 router = APIRouter(prefix="/admin", dependencies=[Depends(check_parent)])
