@@ -142,8 +142,8 @@ def search(query: str = "", age: int | None = None, max_minutes: int | None = No
     ft = build_ft_query(query or "")
     with cursor() as cur:
         if ft:
-            # ngram находит и середину слова («лис» в «Василисе»), поэтому совпадение
-            # с начала слова поднимаем в выдаче: в названии и тегах — сильнее, в описании — слабее
+            # ngram находит и середину слова («лис» в «Василисе», «вед» в «медведе»), поэтому сказки
+            # с совпадением от начала слова идут первыми (ws), внутри — по релевантности
             bonus, bonus_params = "", []
             for s in stems_of(query):
                 pattern = r"(^|[^\p{L}])" + s.replace("е", "[её]")  # «елка» ↔ «ёлка»
@@ -154,10 +154,10 @@ def search(query: str = "", age: int | None = None, max_minutes: int | None = No
                 "SELECT *, "
                 " MATCH(title) AGAINST (%s IN BOOLEAN MODE) * 3 "
                 " + MATCH(title, author, description, tags) AGAINST (%s IN BOOLEAN MODE)"
-                + bonus + " AS score "
+                + " AS score, 0" + bonus + " AS ws "
                 "FROM tales WHERE MATCH(title, author, description, tags) AGAINST (%s IN BOOLEAN MODE)"
                 + "".join(f" AND {w}" for w in where)
-                + " ORDER BY score DESC LIMIT %s"
+                + " ORDER BY ws DESC, score DESC LIMIT %s"
             )
             cur.execute(sql, [ft, ft, *bonus_params, ft, *params, limit])
         else:
