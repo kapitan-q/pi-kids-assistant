@@ -57,10 +57,12 @@ import actions
 import admin
 import lang
 import modules
+import onboarding
 import parent_commands
 import policy
 import profiles
 import quick_commands
+import voices
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gateway")
@@ -68,6 +70,8 @@ log = logging.getLogger("gateway")
 STT_URL = os.getenv("STT_URL", "http://stt:8000")
 TTS_URL = os.getenv("TTS_URL", "http://tts:8000")
 AGENT_URL = os.getenv("AGENT_URL", "http://agent:8000")
+VOICEID_URL = os.getenv("VOICEID_URL", "http://voiceid:8000")
+VOICEID_TIMEOUT = float(os.getenv("VOICEID_TIMEOUT", "5"))
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8080").rstrip("/")
 GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN", "")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -78,7 +82,7 @@ SPEECH_DIR = Path(os.getenv("SPEECH_DIR", "/tmp/speech"))
 SPEECH_TTL_SEC = int(os.getenv("SPEECH_TTL_SEC", "600"))
 # Старый Pi-клиент знает только tale_id и не шлёт source: считаем, что это этот модуль.
 LEGACY_SOURCE = os.getenv("LEGACY_SOURCE", "books")
-CORE_SERVICES = {"stt": STT_URL, "tts": TTS_URL, "agent": AGENT_URL}
+CORE_SERVICES = {"stt": STT_URL, "tts": TTS_URL, "agent": AGENT_URL, "voiceid": VOICEID_URL}
 
 http: httpx.AsyncClient
 now_playing: dict[str, dict] = {}     # device_id -> {"source", "item_id", "tags", "age_min"} последнего play
@@ -202,9 +206,28 @@ def to_pi(action: dict | None) -> dict | None:
     return action
 
 
-def identify_speaker(_audio: bytes) -> str | None:
-    """Заглушка под узнавание по голосу. Вернёт id профиля или None."""
-    return None
+async def voice_print(data: bytes, filename: str) -> dict | None:
+    """Голосовой отпечаток фразы (voiceid). Ошибка/таймаут — None: тогда говорящий неизвестен (строже)."""
+    try:
+        r = await http.post(f"{VOICEID_URL}/embed", timeout=VOICEID_TIMEOUT,
+                            files={"file": (filename, data, "audio/wav")})
+        r.raise_for_status()
+        return r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning("voiceid: %r", e)
+        return None
+
+
+def identify_speaker(vp: dict | None) -> tuple[str | None, float]:
+    """(id профиля | None, близость). Ниже порога voice.threshold — не узнан."""
+    if not vp:
+        return None, 0.0
+    pid, score = voices.store.identify(vp["vector"])
+    threshold = float((policy.config().get("voice") or {}).get("threshold", 0.6))
+    if pid and score >= threshold and profiles.store.get(pid):
+        profiles.store.touch(pid)
+        return pid, score
+    return None, score
 
 
 # ---------- основной сценарий ----------
@@ -245,19 +268,28 @@ def available_modules(res, speaker: str | None) -> dict[str, str]:
 
 
 async def handle_text(device_id: str, text: str, speaker: str | None,
-                      playing: tuple[str | None, str | None] = (None, None)) -> dict:
-    """playing = (source, item_id) того, что загружено в плеере Pi."""
+                      playing: tuple[str | None, str | None] = (None, None),
+                      utt: onboarding.Utterance | None = None, admin_verified: bool = False) -> dict:
+    """playing = (source, item_id) того, что загружено в плеере Pi; utt — голос фразы (для знакомства)."""
+    utt = utt or onboarding.Utterance(text=text)
+    # 0. Идёт знакомство — все реплики ему
+    if onboarding.active(device_id):
+        r = onboarding.step(device_id, utt)
+        return await _answer(text, r["reply"], None, policy.limits(policy.resolve(speaker)),
+                             onboarding=True, expect_reply=r["expect_reply"])
+
     # 1. Команды родителя.
-    #    Проверенный родитель (speaker=parent — пока только через админ-токен) может всё.
-    #    Кодовая фраза голосом — только ужесточать режим (её могут подслушать дети),
-    #    снимать — если parent.voice_can_relax: true. К агенту такие фразы не уходят.
+    #    Родитель (узнан по голосу или через админ-токен) даёт команды без кодовой фразы.
+    #    Голосом — кодовой фразой или узнанным голосом — только ужесточать режим (фразу подслушают,
+    #    голос можно перепутать); снимать — с админ-токеном или если parent.voice_can_relax: true.
+    #    К агенту такие фразы не уходят.
     cfg = policy.config()
     parent_cfg = cfg.get("parent") or {}
     verified_parent = policy.is_parent(speaker)
     rest = parent_commands.strip_passphrase(text, parent_cfg.get("passphrase", ""))
     if rest is not None or verified_parent:
         cmd_text = rest if rest is not None else text
-        can_relax = verified_parent or bool(parent_cfg.get("voice_can_relax", False))
+        can_relax = admin_verified or bool(parent_cfg.get("voice_can_relax", False))   # голос можно перепутать
         result = await handle_parent_command(cmd_text, can_relax)
         if result:
             return await _answer(cmd_text, result["reply"], None,
@@ -272,6 +304,11 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
     if not policy.children_allowed(res) and not verified_parent:
         reply = res.conf.get("message", "") if policy.announce_once(res) else ""
         return await _answer(text, reply, {"type": "stop"}, lim, blocked=True)
+
+    # 2a. «Давай познакомимся» — новый профиль голосом
+    if onboarding.is_trigger(text):
+        r = onboarding.start(device_id, utt, speaker)
+        return await _answer(text, r["reply"], None, lim, onboarding=True, expect_reply=r["expect_reply"])
 
     # 3. Простые команды плееру («стоп», «потише», «продолжай») — сразу, без Claude
     if QUICK_COMMANDS and (quick := quick_commands.parse(text)) is not None:
@@ -360,15 +397,21 @@ async def ask(audio: UploadFile = File(...), device_id: str = Form("default"),
     data = await audio.read(MAX_AUDIO_BYTES + 1)
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
-    text = await transcribe(data, audio.filename or "audio.wav")
+    name = audio.filename or "audio.wav"
+    text, vp = await asyncio.gather(transcribe(data, name), voice_print(data, name))   # параллельно
     t_stt = time.monotonic()
     if not text:
         return {"heard": "", "reply": "", "speech_url": None, "action": None,
                 "limits": policy.limits(policy.resolve(None))}
-    result = await handle_text(device_id, text, identify_speaker(data), (src, now_playing or None))
+    speaker, score = identify_speaker(vp)
+    utt = onboarding.Utterance(text=text, audio=data, vector=(vp or {}).get("vector"),
+                               speech_sec=(vp or {}).get("speech_sec", 0.0), model=(vp or {}).get("model"))
+    result = await handle_text(device_id, text, speaker, (src, now_playing or None), utt)
+    result["speaker"] = speaker
     result["timing_ms"] = {"stt": int((t_stt - t0) * 1000),
                            "total": int((time.monotonic() - t0) * 1000)}
-    log.info("ask %s: %r -> %r %s", device_id, text, result["reply"], result.get("action"))
+    log.info("ask %s: %r [%s %.2f] -> %r %s", device_id, text, speaker or "гость", score,
+             result["reply"], result.get("action"))
     return result
 
 
@@ -377,7 +420,8 @@ async def ask_text(body: TextIn, x_admin_token: str | None = Header(default=None
     t0 = time.monotonic()
     speaker = body.speaker if is_admin(x_admin_token) else None
     src = body.source or (LEGACY_SOURCE if body.now_playing else None)
-    result = await handle_text(body.device_id, body.text, speaker, (src, body.now_playing))
+    result = await handle_text(body.device_id, body.text, speaker, (src, body.now_playing),
+                               admin_verified=speaker is not None)
     result["timing_ms"] = {"total": int((time.monotonic() - t0) * 1000)}
     return result
 

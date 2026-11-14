@@ -20,6 +20,17 @@ def _mean(vectors: list[list[float]]) -> list[float]:
     return [sum(col) / n for col in zip(*vectors)]
 
 
+def mean(vectors: list[list[float]]) -> list[float]:
+    return _mean(vectors)
+
+
+def cos(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
 class VoiceStore:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -40,6 +51,17 @@ class VoiceStore:
                     except (ValueError, KeyError):
                         log.exception("битый %s", f)
             return dict(self._cache)
+
+    def identify(self, vector: list[float] | None) -> tuple[str | None, float]:
+        """Ближайший профиль и близость (0..1). Решение «узнала/нет» — по порогу у вызывающего."""
+        if not vector:
+            return None, 0.0
+        best, score = None, 0.0
+        for pid, v in self.embeddings().items():
+            s = cos(vector, v)
+            if s > score:
+                best, score = pid, s
+        return best, score
 
     def save(self, pid: str, samples: list[bytes], vectors: list[list[float]], model: str) -> int:
         """Записать (или дописать) голос профиля: wav-образцы + новый средний эмбеддинг."""

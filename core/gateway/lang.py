@@ -25,11 +25,17 @@ def _load() -> dict:
     return _data
 
 
-def t(key: str, **kw) -> str:
-    """t("parent.ok_mode", title=...) — фраза по ключу с подстановками; нет ключа — сам ключ."""
+def get(key: str):
+    """Сырое значение по ключу (например, список фраз); нет — None."""
     node = _load()
     for part in key.split("."):
         node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
+def t(key: str, **kw) -> str:
+    """t("parent.ok_mode", title=...) — фраза по ключу с подстановками; нет ключа — сам ключ."""
+    node = get(key)
     if not isinstance(node, str):
         log.warning("нет фразы %s", key)
         return key

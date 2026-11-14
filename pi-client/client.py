@@ -128,8 +128,8 @@ class Volume:
 
 # ---------------------------------------------------------------- плеер сказок
 
-class TalePlayer:
-    """Постоянный mpv в режиме idle, управление через JSON IPC."""
+class Player:
+    """Постоянный mpv в режиме idle, управление через JSON IPC. Играет то, что включил любой модуль."""
 
     def __init__(self) -> None:
         self.sock = str(STATE_DIR / "mpv.sock")
@@ -145,10 +145,10 @@ class TalePlayer:
             time.sleep(0.1)
         self.lock = threading.Lock()
         self.stop_at: float | None = None   # monotonic-время автостопа
-        self.tale_id: str | None = None     # что сейчас загружено — сервер проверяет правила при «продолжай»
+        self.item: tuple[str, str] | None = None   # (модуль, id) загруженного — сервер проверяет правила при «продолжай»
         self.fade_sec = float(CFG["player"].get("fade_sec", 20))
-        # позиция для «продолжить с того места»: (tale_id, секунда, дослушано) → сервер
-        self.on_progress = lambda tale_id, position, finished: None
+        # позиция для «продолжить с того места»: ((модуль, id), секунда, дослушано) → сервер
+        self.on_progress = lambda item, position, finished: None
         self.position: float | None = None
         self.duration: float | None = None
         self.last_report = 0.0
@@ -185,10 +185,10 @@ class TalePlayer:
     def playing(self) -> bool:
         return self.loaded() and not self.get("pause")
 
-    def play(self, url: str, stop_after_sec: int | None, tale_id: str | None = None,
+    def play(self, url: str, stop_after_sec: int | None, item: tuple[str, str] | None = None,
              start: float | None = None) -> None:
-        self.report()                       # прежняя сказка — запомнить, где остановились
-        self.tale_id, self.position, self.duration = tale_id, None, None
+        self.report()                       # прежнее — запомнить, где остановились
+        self.item, self.position, self.duration = item, None, None
         self.cmd("set_property", "volume", 100)
         if start:
             # продолжить с места: загрузить на паузе, дождаться длительности и перемотать.
@@ -208,14 +208,14 @@ class TalePlayer:
         self.last_report = time.monotonic()
 
     def report(self, finished: bool = False) -> None:
-        """Сообщить серверу позицию текущей сказки (для «продолжи с того места»)."""
-        if not self.tale_id:
+        """Сообщить серверу позицию текущего (для «продолжи с того места»)."""
+        if not self.item:
             return
         pos = self.get("time-pos") if not finished else (self.duration or self.position)
         if pos is None:
             pos = self.position
         if pos is not None:
-            self.on_progress(self.tale_id, float(pos), finished)
+            self.on_progress(self.item, float(pos), finished)
         self.last_report = time.monotonic()
 
     def pause(self) -> None:
@@ -230,7 +230,7 @@ class TalePlayer:
         self.cmd("stop")
         self.cmd("set_property", "volume", 100)
         self.stop_at = None
-        self.tale_id = None
+        self.item = None
 
     def seek(self, seconds: int, mode: str) -> None:
         if self.loaded():
@@ -243,7 +243,7 @@ class TalePlayer:
 
     def tick(self) -> None:
         """Вызывается часто: следим за позицией, плавно гасим звук перед автостопом."""
-        if self.tale_id:
+        if self.item:
             if self.get("idle-active"):
                 if self.position is None and time.monotonic() - self.last_report < 15:
                     pass  # файл ещё грузится — сразу после loadfile mpv какое-то время «idle»
@@ -251,7 +251,7 @@ class TalePlayer:
                     # сказка доиграла до конца — отметить дослушанной
                     if self.position and self.duration and self.position > self.duration - 30:
                         self.report(finished=True)
-                    self.tale_id = None
+                    self.item = None
             else:
                 pos, dur = self.get("time-pos"), self.get("duration")
                 if pos is not None:
@@ -276,7 +276,7 @@ class Client:
     def __init__(self) -> None:
         self.audio: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
         self.volume = Volume()
-        self.player = TalePlayer()
+        self.player = Player()
         self.player.on_progress = self.report_progress
         self.vad = webrtcvad.Vad(int(CFG["audio"].get("vad_aggressiveness", 2)))
         ww = CFG["wakeword"]
@@ -351,21 +351,22 @@ class Client:
     def ask(self, samples: np.ndarray) -> dict:
         buf = io.BytesIO()
         write_wav(buf, samples)
-        now_playing = self.player.tale_id if self.player.loaded() else None
-        position = self.player.get("time-pos") if now_playing else None
+        item = self.player.item if self.player.loaded() else None
+        position = self.player.get("time-pos") if item else None
         r = requests.post(f"{SERVER}/ask", headers=HEADERS, auth=AUTH, timeout=ASK_TIMEOUT,
                           files={"audio": ("q.wav", buf.getvalue(), "audio/wav")},
-                          data={"device_id": DEVICE_ID, "now_playing": now_playing or "",
+                          data={"device_id": DEVICE_ID, "source": item[0] if item else "",
+                                "now_playing": item[1] if item else "",
                                 "position": "" if position is None else f"{position:.1f}"})
         r.raise_for_status()
         return r.json()
 
-    def report_progress(self, tale_id: str, position: float, finished: bool) -> None:
+    def report_progress(self, item: tuple[str, str], position: float, finished: bool) -> None:
         """Позицию — на сервер в фоне: сеть не должна тормозить плеер."""
         def send():
             try:
                 requests.post(f"{SERVER}/progress", headers=HEADERS, auth=AUTH, timeout=10,
-                              json={"device_id": DEVICE_ID, "tale_id": tale_id,
+                              json={"device_id": DEVICE_ID, "source": item[0], "item_id": item[1],
                                     "position": round(position, 1), "finished": finished})
             except Exception as e:  # noqa: BLE001
                 log.warning("позиция не сохранена: %s", e)
@@ -388,7 +389,8 @@ class Client:
         kind = act.get("type")
         log.info("действие: %s", act)
         if kind == "play":
-            self.player.play(act["url"], (lim or {}).get("stop_after_sec"), act.get("tale_id"), act.get("start"))
+            item = (act["source"], act["item_id"]) if act.get("item_id") else None
+            self.player.play(act["url"], (lim or {}).get("stop_after_sec"), item, act.get("start"))
         elif kind == "stop":
             self.player.stop()
         elif kind == "resume":
@@ -468,12 +470,21 @@ class Client:
         return self._exchange(samples, was_playing=False)
 
     def dialog(self) -> None:
+        """Слово активации → ответ → (если это разговор) ещё реплики без слова активации.
+        Сервер может попросить ответ сам (expect_reply: знакомство «давай познакомимся») —
+        тогда слушаем дольше и не считаем такие реплики в max_follow_ups."""
         resp = self.on_wake()
         d = CFG.get("dialog", {})
         wait_sec = float(d.get("follow_up_sec", 6))
-        for _ in range(int(d.get("max_follow_ups", 5))):
-            if wait_sec <= 0 or not self._wants_follow_up(resp):
+        expect_sec = float(d.get("expect_reply_sec", 10))
+        follow_ups = 0
+        for _ in range(30):   # предохранитель от бесконечного диалога
+            if resp and resp.get("expect_reply"):
+                resp = self.follow_up(expect_sec)
+                continue
+            if wait_sec <= 0 or follow_ups >= int(d.get("max_follow_ups", 5)) or not self._wants_follow_up(resp):
                 return
+            follow_ups += 1
             resp = self.follow_up(wait_sec)
 
     # --- фоновые задачи

@@ -23,6 +23,7 @@ services:
       STT_URL: http://stt:8000
       TTS_URL: http://tts:8000
       AGENT_URL: http://agent:8000
+      VOICEID_URL: http://voiceid:8000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?укажи PUBLIC_BASE_URL в .env}
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
@@ -47,6 +48,7 @@ services:
       stt: {condition: service_healthy}
       tts: {condition: service_healthy}
       agent: {condition: service_healthy}
+      voiceid: {condition: service_healthy}
 
   agent:
     <<: *common
@@ -106,6 +108,23 @@ services:
       retries: 3
       start_period: 300s   # первый старт качает голос Piper
 
+  voiceid:
+    <<: *common
+    build: ./core/voiceid
+    # голосовой отпечаток говорящего (sherpa-onnx); профили и голоса хранит gateway
+    environment:
+      TZ: ${TZ:-Europe/Belgrade}
+      VOICEID_MODEL: ${VOICEID_MODEL:-3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k}
+    volumes:
+      - voiceid-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3))['ok']"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s   # первый старт качает модель
+
 volumes:
   whisper-models:
   piper-voices:
+  voiceid-models:
