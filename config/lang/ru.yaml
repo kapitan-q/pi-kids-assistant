@@ -16,7 +16,7 @@ context_unknown: "Говорящий не узнан по голосу"
 parent:
   ok_mode: "Хорошо. {title}{names} до {time}."
   ok_clear: "Хорошо, обычный режим{names}."
-  relax_denied: "Снять режим можно только с телефона."
+  relax_denied: "Снять режим может только взрослый — с телефона или своим голосом."
   not_understood: "Не поняла команду."
   for_names: " для {names}"
 

@@ -3,7 +3,9 @@
 Профиль создаётся знакомством голосом («давай познакомимся») без ролей — как гость.
 Роль — набор разрешений: какие модули можно, какие модули и теги нельзя. У человека может быть
 несколько ролей: разрешено то, что разрешает хоть одна, минус всё, что запрещает любая.
-Встроенные роли: guest (голос не узнан или ролей нет) и parent (всё можно, команды родителя).
+Флаг роли control — «может устанавливать и снимать ограничения»: команды режимов голосом, режимы
+его самого не блокируют. Встроенная роль одна — guest (голос не узнан или ролей нет), ей control
+нельзя. При первом запуске создаётся ещё admin (все модули + control) — обычная роль, её можно менять.
 """
 import json
 import logging
@@ -19,8 +21,9 @@ from pydantic import BaseModel, Field, model_validator
 
 log = logging.getLogger("profiles")
 DATA_DIR = Path(os.getenv("CORE_DATA_DIR", "/data/core"))
-GUEST, PARENT = "guest", "parent"
-BUILTIN = (GUEST, PARENT)
+GUEST, ADMIN = "guest", "admin"
+BUILTIN = (GUEST,)
+LEGACY_PARENT = "parent"                  # прежняя встроенная роль «Родитель» → admin
 LEGACY_ROLES = {"newcomer", GUEST}        # старая роль «новичок» = без ролей
 
 
@@ -60,11 +63,19 @@ class Profile(BaseModel):
 class Role(BaseModel):
     id: str = Field(pattern=r"^[\w-]{1,32}$")
     title: str = Field(min_length=1, max_length=40)
-    parent: bool = False                                       # всё можно + команды родителя
+    control: bool = False                  # может устанавливать и снимать ограничения
     allow_modules: list[str] = Field(default_factory=list)
     deny_modules: list[str] = Field(default_factory=list)
     deny_tags: list[str] = Field(default_factory=list)
     created_at: float = Field(default_factory=time.time)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, data):
+        if isinstance(data, dict) and "parent" in data:
+            data = dict(data)
+            data.setdefault("control", bool(data.pop("parent")))
+        return data
 
 
 M = TypeVar("M", bound=BaseModel)
@@ -87,14 +98,17 @@ class JsonStore(Generic[M]):
             self.items = {x["id"]: self.model.model_validate(x) for x in raw.get(self.key, [])}
         except FileNotFoundError:
             self.items = {}
+            self.loaded = True
+            self._loaded(fresh=True)
+            return
         except (ValueError, KeyError):
             log.exception("%s повреждён — работаю без него (файл не трогаю)", self.path.name)
             self.items = {}
         self.loaded = True
-        self._loaded()
+        self._loaded(fresh=False)
 
-    def _loaded(self) -> None:
-        """Хук после загрузки (значения по умолчанию)."""
+    def _loaded(self, fresh: bool) -> None:
+        """Хук после загрузки (значения по умолчанию); fresh — файла ещё не было."""
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,15 +178,24 @@ class ProfileStore(JsonStore[Profile]):
 
 
 class RoleStore(JsonStore[Role]):
-    def _loaded(self) -> None:
-        """Встроенные роли есть всегда; роли, на которые ссылаются профили, но которых нет, — создаются
-        (переход со старых ролей из yaml: можно переименовать и настроить в админке)."""
+    def _loaded(self, fresh: bool) -> None:
+        """Гость есть всегда; при первом запуске — ещё «Админ». Переход со старых версий:
+        «Родитель» (parent) → «Админ» (admin), роли из yaml, на которые ссылаются профили, — создаются
+        (можно переименовать и настроить в админке)."""
         changed = False
         if GUEST not in self.items:
             self.items[GUEST] = Role(id=GUEST, title="Гость", allow_modules=default_modules(), created_at=0)
             changed = True
-        if PARENT not in self.items:
-            self.items[PARENT] = Role(id=PARENT, title="Родитель", parent=True, created_at=1)
+        self.items[GUEST].control = False
+        users_of_parent = [p for p in profiles_store.all() if LEGACY_PARENT in p.roles]
+        if fresh or LEGACY_PARENT in self.items or users_of_parent:
+            self.items.pop(LEGACY_PARENT, None)
+            if ADMIN not in self.items:
+                self.items[ADMIN] = Role(id=ADMIN, title="Админ", control=True,
+                                         allow_modules=default_modules(), created_at=1)
+            for p in users_of_parent:
+                profiles_store.update(p.id, roles=[ADMIN if r == LEGACY_PARENT else r for r in p.roles])
+                log.info("профиль %s: роль «Родитель» → «Админ»", p.id)
             changed = True
         for p in profiles_store.all():
             for r in p.roles:
@@ -193,7 +216,7 @@ class RoleStore(JsonStore[Role]):
 
 
 def default_modules() -> list[str]:
-    """Модули для новой встроенной роли: все включённые (меняется в админке)."""
+    """Модули для роли по умолчанию: все включённые (меняется в админке)."""
     try:
         import modules
         return list(modules.enabled())

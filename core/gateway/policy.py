@@ -80,13 +80,14 @@ def role_list(speaker: str | None) -> list[profiles.Role]:
     return [profiles.roles.get(r) for r in role_ids(speaker)]
 
 
-def is_parent(speaker: str | None) -> bool:
-    return bool(speaker) and any(r.parent for r in role_list(speaker))
+def can_control(speaker: str | None) -> bool:
+    """Может устанавливать и снимать ограничения (флаг control у какой-нибудь из ролей)."""
+    return bool(speaker) and any(r.control for r in role_list(speaker))
 
 
 def children() -> list[str]:
-    """id профилей, на которых действуют детские правила (все, кроме родителей)."""
-    return [p.id for p in profiles.store.all() if not is_parent(p.id)]
+    """id профилей, на которых действуют ограничения (все, кроме тех, кто ими управляет)."""
+    return [p.id for p in profiles.store.all() if not can_control(p.id)]
 
 
 def unverified(speaker: str | None) -> bool:
@@ -110,12 +111,10 @@ def speaker_matches(who: list | None, speaker: str | None, mode: str | None = No
 
 def access(speaker: str | None) -> dict:
     """Что можно говорящему по его ролям: модули, которые разрешает хоть одна роль, минус те,
-    что запрещает любая; запрещённые теги — от всех ролей. Родитель — всё.
+    что запрещает любая; запрещённые теги — от всех ролей.
     {"modules": [..] | None (любые), "tags_deny": set, "age": int | None}"""
     age = profile(speaker).get("age")
     rs = role_list(speaker)
-    if any(r.parent for r in rs):
-        return {"modules": None, "tags_deny": set(), "age": age}
     deny_mods = {m for r in rs for m in r.deny_modules}
     allowed = []
     for r in rs:
@@ -362,25 +361,26 @@ def allowed_modules(res: Resolved, acc: dict | None) -> list[str] | None:
     return out
 
 
-def check_playback(res: Resolved, item: dict | None, acc: dict | None = None) -> str | None:
+def check_playback(res: Resolved, item: dict | None, acc: dict | None = None, modes: bool = True) -> str | None:
     """Можно ли сейчас включить/продолжить item = {"source", "tags": [..] | None, "age_min"}.
-    acc — access(speaker): модули, запрещённые теги, возраст.
+    acc — access(speaker): модули, запрещённые теги, возраст (по ролям — проверяется всегда).
+    modes=False — режим не проверять (говорящий сам управляет ограничениями).
     item=None — ничего не играет (продолжать нечего, проверяем только режим и бюджет).
     tags=None — что играет, известно, а теги узнать не удалось: если режим требует теги — нельзя.
     None — можно; иначе фраза, которую сказать ребёнку."""
     acc = acc or {}
-    if not children_allowed(res):
+    if modes and not children_allowed(res):
         return res.conf.get("message") or lang.t("blocked_default")
     if item is not None:
-        mods = allowed_modules(res, acc)
+        mods = allowed_modules(res, acc) if modes else acc.get("modules")
         if mods is not None and item.get("source") not in mods:
             return res.conf.get("modules_message") or lang.t("module_denied")
-    remaining = budget_remaining_sec(res)
+    remaining = budget_remaining_sec(res) if modes else None
     if remaining is not None and remaining <= 0:
         return res.conf.get("budget_message") or lang.t("budget_default")
     if item is None:
         return None
-    allowed_tags = {t.lower() for t in res.conf.get("tags") or []}
+    allowed_tags = {t.lower() for t in res.conf.get("tags") or []} if modes else set()
     tags = item.get("tags")
     if allowed_tags and (tags is None or not allowed_tags & {t.lower() for t in tags}):
         return res.conf.get("tags_message") or lang.t("tags_default")

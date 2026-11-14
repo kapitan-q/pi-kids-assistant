@@ -32,14 +32,14 @@ import profiles  # noqa: E402
 
 
 def _seed():
-    """Роли и люди как на titan: Дети (сказки), Папа — родитель, Старший и Младший — дети."""
+    """Роли и люди как на titan: Гость, Админ, Дети (сказки); Папа — админ, Старший и Младший — дети."""
     profiles.roles.update(profiles.GUEST, allow_modules=["books"])
     with profiles.roles.lock:
         profiles.roles.items["child"] = profiles.Role(id="child", title="Дети", allow_modules=["books"])
         profiles.roles._save()
     with profiles.store.lock:
         profiles.store._load()
-        for p in (profiles.Profile(id="dad", name="Папа", roles=["parent"], created_at=1),
+        for p in (profiles.Profile(id="dad", name="Папа", roles=["admin"], created_at=1),
                   profiles.Profile(id="older", name="Старший", roles=["child"], age=9, aliases=["старш"], created_at=2),
                   profiles.Profile(id="younger", name="Младший", roles=["child"], age=7, aliases=["младш"],
                                    created_at=3)):

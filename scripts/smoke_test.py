@@ -165,7 +165,7 @@ call("DELETE", "/control/override", admin=True)
 d = say("Капитан Немо, тихий час на сорок пять минут")
 check("«…тихий час на сорок пять минут» → режим включён", d.get("parent_command") and d["limits"]["mode"] == "quiet", d)
 d = say("Капитан Немо, отбой тишины")
-check("снять голосом нельзя (voice_can_relax: false)", "телефон" in d.get("reply", "") and d["limits"]["mode"] == "quiet", d)
+check("кодовой фразой без права снимать — нельзя", "телефон" in d.get("reply", "") and d["limits"]["mode"] == "quiet", d)
 
 call("DELETE", "/control/override", admin=True)
 call("POST", "/reset", {"device_id": DEVICE})

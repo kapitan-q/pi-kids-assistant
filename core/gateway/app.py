@@ -263,8 +263,9 @@ async def _answer(text: str, reply: str, action: dict | None, lim: dict, **extra
 
 
 def available_modules(res, speaker: str | None) -> dict[str, str]:
-    """Модули, которые сейчас можно включать: включённые ∩ режим ∩ роль/профиль говорящего."""
-    return modules.titles(policy.allowed_modules(res, policy.access(speaker)))
+    """Модули, которые сейчас можно включать: включённые ∩ режим (если он действует на говорящего) ∩ роли."""
+    acc = policy.access(speaker)
+    return modules.titles(acc["modules"] if policy.can_control(speaker) else policy.allowed_modules(res, acc))
 
 
 async def handle_text(device_id: str, text: str, speaker: str | None,
@@ -278,19 +279,18 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         return await _answer(text, r["reply"], None, policy.limits(policy.resolve(speaker)),
                              onboarding=True, expect_reply=r["expect_reply"])
 
-    # 1. Команды родителя.
-    #    Родитель (узнан по голосу или через админ-токен) даёт команды без кодовой фразы.
-    #    Голосом — кодовой фразой или узнанным голосом — только ужесточать режим (фразу подслушают,
-    #    голос можно перепутать); снимать — с админ-токеном или если parent.voice_can_relax: true.
+    # 1. Команды режимов («тихий час», «режим уроков для старшего», «отбой тишины»).
+    #    Тот, у кого в роли стоит «может устанавливать и снимать ограничения» (узнан по голосу),
+    #    даёт их без кодовой фразы — и ставит, и снимает. Кодовая фраза без такой роли — только
+    #    ужесточить (фразу могут подслушать). С админ-токеном (/text для скриптов) — всё.
     #    К агенту такие фразы не уходят.
     cfg = policy.config()
     parent_cfg = cfg.get("parent") or {}
-    verified_parent = policy.is_parent(speaker)
+    controller = policy.can_control(speaker)
     rest = parent_commands.strip_passphrase(text, parent_cfg.get("passphrase", ""))
-    if rest is not None or verified_parent:
+    if rest is not None or controller:
         cmd_text = rest if rest is not None else text
-        can_relax = admin_verified or bool(parent_cfg.get("voice_can_relax", False))   # голос можно перепутать
-        result = await handle_parent_command(cmd_text, can_relax)
+        result = await handle_parent_command(cmd_text, can_relax=admin_verified or controller)
         if result:
             return await _answer(cmd_text, result["reply"], None,
                                  policy.limits(policy.resolve(None)), parent_command=True)
@@ -301,7 +301,7 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
     # 2. Режим для этого говорящего
     res = policy.resolve(speaker)
     lim = policy.limits(res)
-    if not policy.children_allowed(res) and not verified_parent:
+    if not policy.children_allowed(res) and not controller:
         reply = res.conf.get("message", "") if policy.announce_once(res) else ""
         return await _answer(text, reply, {"type": "stop"}, lim, blocked=True)
 
@@ -313,7 +313,7 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
     # 3. Простые команды плееру («стоп», «потише», «продолжай») — сразу, без Claude
     if QUICK_COMMANDS and (quick := quick_commands.parse(text)) is not None:
         action, reply, lim = await enforce(quick["action"], "", res, lim, device_id, playing,
-                                           speaker, verified_parent)
+                                           speaker, controller)
         log.info("quick %s: %r -> %s", device_id, text, action)
         return await _answer(text, reply, action, lim, quick=True)
 
@@ -330,21 +330,21 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         return await _answer(text, lang.t("fallback"), None, lim, error="agent")
     reply = data.get("reply", "")
     action = actions.validate(data.get("action"), modules.enabled())
-    action, reply, lim = await enforce(action, reply, res, lim, device_id, playing, speaker, verified_parent)
+    action, reply, lim = await enforce(action, reply, res, lim, device_id, playing, speaker, controller)
     return await _answer(text, reply, action, lim)
 
 
 async def enforce(action: dict | None, reply: str, res, lim: dict, device_id: str,
                   playing: tuple[str | None, str | None], speaker: str | None,
-                  verified_parent: bool) -> tuple[dict | None, str, dict]:
-    """Страховка: правила режима важнее того, что решил агент (или быстрая команда) —
+                  controller: bool) -> tuple[dict | None, str, dict]:
+    """Страховка: правила режима и ролей важнее того, что решил агент (или быстрая команда) —
     и для нового, и для «продолжай»/перемотки уже загруженного."""
-    if action and action["type"] in ("play", "resume", "seek") and not verified_parent:
+    if action and action["type"] in ("play", "resume", "seek"):
         if action["type"] == "play":
             item = {k: action.get(k) for k in ("source", "item_id", "tags", "age_min")}
         else:
             item = await playing_item(device_id, *playing)
-        deny = policy.check_playback(res, item, policy.access(speaker))
+        deny = policy.check_playback(res, item, policy.access(speaker), modes=not controller)
         if deny:
             action, reply = ({"type": "stop"} if action["type"] != "play" else None), deny
         else:

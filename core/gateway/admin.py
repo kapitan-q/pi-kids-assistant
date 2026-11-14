@@ -81,12 +81,13 @@ class RolePatch(BaseModel):
     allow_modules: list[str] | None = None
     deny_modules: list[str] | None = None
     deny_tags: list[str] | None = None
+    control: bool | None = None       # может устанавливать и снимать ограничения
 
 
 def _view(p: profiles.Profile) -> dict:
     d = p.model_dump()
     acc = policy.access(p.id)
-    d["is_parent"] = policy.is_parent(p.id)
+    d["can_control"] = policy.can_control(p.id)
     d["unverified"] = policy.unverified(p.id)
     d["effective"] = {"modules": acc["modules"], "deny_tags": sorted(acc["tags_deny"])}
     return d
@@ -160,8 +161,8 @@ def patch_role(rid: str, body: RolePatch):
     if not r:
         raise HTTPException(404)
     fields = body.model_dump(exclude_none=True)
-    if r.parent and set(fields) - {"title"}:
-        raise HTTPException(400, "родителю можно всё — у этой роли меняется только название")
+    if rid == profiles.GUEST and fields.get("control"):
+        raise HTTPException(400, "гостю нельзя управлять ограничениями — голос не узнан")
     for key in ("allow_modules", "deny_modules"):
         if key in fields:
             fields[key] = _clean(fields[key])

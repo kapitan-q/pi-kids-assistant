@@ -119,13 +119,17 @@ function checks(name, selected) {
 
 function roleCard(r) {
   const used = r.used_by.length ? `у ${r.used_by.length} чел.` : "ни у кого";
-  const body = r.parent
-    ? '<p class="summary">Родителю можно всё: любые модули и теги, команды без кодовой фразы.</p>'
-    : `<div class="grid">
+  const control = r.id === "guest" ? ""
+    : `<div class="wide checks"><label><input type="checkbox" name="control" ${r.control ? "checked" : ""}>
+         Может устанавливать и снимать ограничения</label></div>
+       <div class="wide status">Голосом ставит и снимает режимы (тихий час, уроки, ночь) без кодовой фразы;
+         сами режимы его не ограничивают.</div>`;
+  const body = `<div class="grid">
         <div><label>Разрешённые модули</label>${checks("allow", r.allow_modules)}</div>
         <div><label>Запрещённые модули</label>${checks("deny", r.deny_modules)}</div>
         <div class="wide"><label>Запрещённые теги (через запятую)</label>
           <input type="text" name="deny_tags" value="${esc(r.deny_tags.join(", "))}" placeholder="страшные, возраст:12-16"></div>
+        ${control}
       </div>`;
   return `<div class="card" data-role="${esc(r.id)}">
     <div class="head">
@@ -149,10 +153,10 @@ function profileCard(p) {
   ).join("");
   const chips = p.unverified ? `<span class="chip warn">${esc(roleTitle("guest"))} — роли не назначены</span>`
     : p.roles.map(r => `<span class="chip">${esc(roleTitle(r))}</span>`).join("");
-  const eff = p.is_parent ? "можно всё"
-    : `модули: ${esc(modTitles(p.effective.modules) || "никаких")}` +
+  const eff = `модули: ${esc(modTitles(p.effective.modules) || "никаких")}` +
       (p.effective.deny_tags.length ? `; нельзя теги: ${esc(p.effective.deny_tags.join(", "))}` : "") +
-      (p.age ? `; возраст ${p.age} — не включу то, что для старших` : "");
+      (p.age ? `; возраст ${p.age} — не включу то, что для старших` : "") +
+      (p.can_control ? "; <b>управляет ограничениями</b>" : "");
   const others = data.profiles.filter(o => o.id !== p.id)
     .map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join("");
   const voice = p.voice.samples ? `голос: ${p.voice.samples} образц.` : "голос не записан";
@@ -201,6 +205,8 @@ $("#roles").addEventListener("click", async ev => {
         body.allow_modules = $$("[name=allow]:checked", el).map(i => i.value);
         body.deny_modules = $$("[name=deny]:checked", el).map(i => i.value);
         body.deny_tags = split($("[name=deny_tags]", el).value);
+        const ctl = $("[name=control]", el);
+        if (ctl) body.control = ctl.checked;
       }
       await api("PATCH", "/roles/" + id, body);
       await load();

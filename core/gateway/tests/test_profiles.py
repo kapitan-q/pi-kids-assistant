@@ -27,7 +27,7 @@ def auth(user="parent", pw=PW):
 
 def test_migrated_profiles():
     assert {p.id for p in profiles.store.all()} >= {"dad", "older", "younger"}
-    assert policy.is_parent("dad") and not policy.is_parent("older") and not policy.is_parent(None)
+    assert policy.can_control("dad") and not policy.can_control("older") and not policy.can_control(None)
 
 
 def test_access_combines_roles_deny_wins():
@@ -43,7 +43,7 @@ def test_access_combines_roles_deny_wins():
     assert policy.check_playback(policy.resolve(p.id), item, acc)
     profiles.roles.update(small.id, deny_modules=["books"])            # запрет сильнее разрешения «Дети»
     assert policy.access(p.id)["modules"] == []
-    assert policy.access("dad")["modules"] is None                     # родителю — всё
+    assert policy.access("dad")["modules"] == ["books"]                # админ: модули — тоже по роли
     profiles.store.delete(p.id)
     profiles.roles.delete(small.id)
 
@@ -61,7 +61,7 @@ def test_admin_requires_parent_password(client):
     assert client.get("/admin/api/profiles").status_code == 401
     assert client.get("/admin/api/profiles", headers=auth(pw="speaker-pass")).status_code == 401
     r = client.get("/admin/api/profiles", headers=auth())
-    assert r.status_code == 200 and {"guest", "parent", "child"} <= {x["id"] for x in r.json()["roles"]}
+    assert r.status_code == 200 and {"guest", "admin", "child"} <= {x["id"] for x in r.json()["roles"]}
     assert client.get("/admin", headers=auth()).headers["content-type"].startswith("text/html")
 
 
@@ -84,8 +84,9 @@ def test_admin_roles_crud(client, monkeypatch):
                      json={"allow_modules": ["books"], "deny_tags": [" страшные ", "страшные"]})
     assert r.json()["deny_tags"] == ["страшные"]
     assert client.patch(f"/admin/api/roles/{rid}", headers=auth(), json={"deny_modules": ["nope"]}).status_code == 400
-    assert client.patch("/admin/api/roles/parent", headers=auth(), json={"deny_tags": ["x"]}).status_code == 400
-    assert client.patch("/admin/api/roles/parent", headers=auth(), json={"title": "Мама и папа"}).status_code == 200
+    assert client.patch("/admin/api/roles/guest", headers=auth(), json={"control": True}).status_code == 400
+    r = client.patch(f"/admin/api/roles/{rid}", headers=auth(), json={"control": True})
+    assert r.json()["control"] and policy.can_control("younger") is False   # роль ещё не назначена
     assert client.delete("/admin/api/roles/guest", headers=auth()).status_code == 400
     profiles.store.update("younger", roles=["child", rid])
     orig = policy.config
@@ -96,7 +97,9 @@ def test_admin_roles_crud(client, monkeypatch):
     monkeypatch.setattr(policy, "config", orig)
     assert client.delete(f"/admin/api/roles/{rid}", headers=auth()).json() == {"ok": True}
     assert profiles.store.get("younger").roles == ["child"]
-    profiles.roles.update("parent", title="Родитель")
+    assert client.delete("/admin/api/roles/admin", headers=auth()).status_code == 200   # «Админ» — обычная роль
+    profiles.roles.items["admin"] = profiles.Role(id="admin", title="Админ", control=True, allow_modules=["books"])
+    profiles.store.update("dad", roles=["admin"])
 
 
 def test_admin_merge_moves_voice(client):
@@ -153,3 +156,23 @@ def test_admin_onboarding_toggle(client):
     assert r.json()["onboarding_enabled"] is False and policy.onboarding_enabled() is False
     client.post("/admin/api/settings", headers=auth(), json={"onboarding_enabled": True})
     assert policy.onboarding_enabled()
+
+
+def test_control_flag_voice_commands(at, monkeypatch):
+    """«Может устанавливать и снимать ограничения»: ставит и снимает голосом; режимы его не блокируют."""
+    import asyncio
+    at(2026, 11, 16, 12, 0)
+
+    async def no_tts(text):
+        return None
+    monkeypatch.setattr(app, "synthesize", no_tts)
+    ask = lambda text, speaker: asyncio.run(app.handle_text("d-ctl", text, speaker))  # noqa: E731
+
+    d = ask("тихий час на десять минут", "dad")                     # без кодовой фразы
+    assert d.get("parent_command") and policy.resolve("older").mode == "quiet"
+    assert not policy.check_playback(policy.resolve("dad"), {"source": "books", "tags": []},
+                                     policy.access("dad"), modes=False)
+    d = ask("капитан немо отбой тишины", "older")                   # кодовая фраза без права — нельзя
+    assert "взрослый" in d["reply"] and policy.resolve("older").mode == "quiet"
+    d = ask("отбой тишины", "dad")
+    assert d.get("parent_command") and policy.resolve("older").mode == "normal"
