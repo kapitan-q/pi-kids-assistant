@@ -1,13 +1,7 @@
 FROM python:3.12-slim
 
-# Agent SDK запускает Claude Code CLI. Свежие колёса claude-agent-sdk несут CLI внутри,
-# Node + глобальный пакет ставим для надёжности (если CLI в колесе нет — возьмётся этот).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
- && npm install -g @anthropic-ai/claude-code \
- && npm cache clean --force \
- && rm -rf /var/lib/apt/lists/*
-
+# claude-agent-sdk несёт Claude Code CLI внутри колеса (нативный бинарник _bundled/claude),
+# поэтому Node и npm-пакет не нужны. Версия CLI закреплена версией SDK в requirements.txt.
 RUN useradd -m app
 WORKDIR /app
 COPY requirements.txt .

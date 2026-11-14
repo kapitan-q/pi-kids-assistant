@@ -185,6 +185,7 @@ async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
     cost = None
     tools_called: list[str] = []
     result_subtype = None
+    is_error = False
 
     async for msg in client.receive_response():
         if isinstance(msg, AssistantMessage):
@@ -214,8 +215,15 @@ async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
         elif isinstance(msg, ResultMessage):
             cost = msg.total_cost_usd
             result_subtype = getattr(msg, "subtype", None)
+            is_error = bool(getattr(msg, "is_error", False))
 
     reply = " ".join(after_tools) or " ".join(before_tools[-1:])
+    if is_error:
+        # ошибки API/CLI («Invalid API key», лимиты) приходят обычным текстом —
+        # ребёнку их зачитывать нельзя
+        log.error("turn error (result=%s): %s", result_subtype, reply[:300])
+        return {"reply": FALLBACK_REPLY, "action": action, "cost_usd": cost,
+                "tools": tools_called, "error": result_subtype or "is_error"}
     if not reply and not action:
         # error_max_turns и т.п.: лучше сказать хоть что-то, чем молчать
         log.warning("empty reply (result=%s)", result_subtype)

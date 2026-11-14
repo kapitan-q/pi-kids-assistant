@@ -1,4 +1,6 @@
-faster-whisper>=1.1
-fastapi>=0.115
-uvicorn[standard]>=0.30
-python-multipart>=0.0.9
+faster-whisper==1.2.1
+# av 16+ убрал metadata_errors, который передаёт faster-whisper 1.2.1
+av==15.1.0
+fastapi==0.162.7
+uvicorn[standard]==0.54.0
+python-multipart==0.0.33

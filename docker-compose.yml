@@ -38,6 +38,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      # Traefik не маршрутизирует контейнер, пока он «starting» — проверяем часто на старте
+      start_period: 30s
+      start_interval: 2s
     depends_on:
       stt: {condition: service_healthy}
       tts: {condition: service_healthy}
