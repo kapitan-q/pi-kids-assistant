@@ -3,7 +3,7 @@
 
 Запуск на сервере:  python3 scripts/smoke_test.py
 (логин/пароль и ADMIN_TOKEN берутся из .speaker-password и .env; URL — из KS_HOST)
-Нужны тестовые сказки из library/_test (Колобок, Теремок, Рыбка, Сонная сказка).
+Работает на настоящей библиотеке: нужны «Мойдодыр» (тег «на ночь») и «Сказка о рыбаке и рыбке» (без него).
 Ответы Claude недетерминированы — проверяем тип и параметры команды, а не текст.
 """
 import base64
@@ -74,9 +74,9 @@ call("POST", "/reset", {"device_id": DEVICE})
 
 # ---------------------------------------------------------------- обычный режим
 section("Обычный режим")
-d = say("включи сказку про колобка")
+d = say("включи мойдодыра")
 a = d.get("action") or {}
-check("«включи колобка» → play Колобок", kind(d) == "play" and a.get("title") == "Колобок", d)
+check("«включи мойдодыра» → play Мойдодыр", kind(d) == "play" and a.get("title") == "Мойдодыр", d)
 kolobok_id = a.get("tale_id")
 if a.get("url"):
     req = urllib.request.Request(a["url"], method="HEAD", headers={"Authorization": AUTH})
@@ -101,8 +101,9 @@ a = d.get("action") or {}
 check("«потише» → volume change < 0", kind(d) == "volume" and (a.get("change") or 0) < 0, d)
 d = say("громкость пятьдесят", kolobok_id)
 check("«громкость пятьдесят» → volume level 50", kind(d) == "volume" and (d.get("action") or {}).get("level") == 50, d)
-d = say("включи сказку Пушкина")
-check("«сказку Пушкина» → play Рыбка", kind(d) == "play" and "рыб" in (d.get("action") or {}).get("title", "").lower(), d)
+d = say("включи сказку о рыбаке и рыбке")
+rybka_id = (d.get("action") or {}).get("tale_id")
+check("«о рыбаке и рыбке» → play", kind(d) == "play" and "рыб" in (d.get("action") or {}).get("title", "").lower(), d)
 d = say("почему небо голубое?")
 check("вопрос «почему небо голубое» → ответ без команды", kind(d) is None and len(d.get("reply", "")) > 10, d)
 d = say("включи любую сказку")
@@ -114,7 +115,7 @@ for phrase, want in [("стоп", "stop"), ("продолжай", "resume"), ("�
                      ("громкость семьдесят", "volume"), ("перемотай назад", "seek")]:
     d = say(phrase, kolobok_id)
     check(f"«{phrase}» → {want} мгновенно", d.get("quick") and kind(d) == want and d["_ms"] < 1500, d)
-d = say("стоп а почему колобок убежал")
+d = say("стоп а почему мойдодыр сердится")
 check("сложная фраза уходит к Claude", not d.get("quick") and d.get("reply"), d)
 
 # ---------------------------------------------------------------- ночь
@@ -124,24 +125,24 @@ call("POST", "/reset", {"device_id": DEVICE})
 d = say("включи сказку про рыбака и рыбку")
 a = d.get("action") or {}
 check("ночью «рыбка» (не на ночь) → не включается", kind(d) is None or "на ночь" in a.get("tags", ""), d)
-d = say("включи колобка")
+d = say("включи мойдодыра")
 lim = d.get("limits") or {}
-check("ночью «колобок» (на ночь) → play + таймер", kind(d) == "play" and lim.get("stop_after_sec") and lim.get("max_volume") == 30, d)
+check("ночью «мойдодыр» (на ночь) → play + таймер", kind(d) == "play" and lim.get("stop_after_sec") and lim.get("max_volume") == 30, d)
 d = say("сделай громкость на максимум", kolobok_id)
 a = d.get("action") or {}
 check("ночью «на максимум» → не выше 30", kind(d) == "volume" and (a.get("level") is None or a.get("level") <= 30), d)
 
-d = say("продолжай", 2)   # сейчас загружена «Рыбка» (без тега «на ночь»)
+d = say("продолжай", rybka_id)   # сейчас загружена «Рыбка» (без тега «на ночь»)
 check("ночью «продолжай» не-ночную сказку → stop", kind(d) in ("stop", None) and kind(d) != "resume", d)
 
 # ---------------------------------------------------------------- тихий час
 section("Тихий час")
 call("POST", "/admin/override", {"mode": "quiet", "minutes": 10}, admin=True)
-d = say("включи колобка")
+d = say("включи мойдодыра")
 check("в тихий час → blocked + stop + сообщение", d.get("blocked") and kind(d) == "stop" and d.get("reply"), d)
 d = say("ну пожалуйста включи")
 check("повторно → молчит (reply пустой)", d.get("blocked") and d.get("reply") == "", d)
-d = say("Капитан Немо, включи колобка")
+d = say("Капитан Немо, включи мойдодыра")
 check("кодовая фраза не обходит блок", kind(d) is None and d.get("parent_command"), d)
 
 # ---------------------------------------------------------------- родитель
