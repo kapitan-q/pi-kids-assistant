@@ -54,10 +54,12 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import actions
+import admin
 import lang
 import modules
 import parent_commands
 import policy
+import profiles
 import quick_commands
 
 logging.basicConfig(level=logging.INFO)
@@ -88,8 +90,10 @@ async def lifespan(_app: FastAPI):
     global http
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
     http = httpx.AsyncClient(timeout=httpx.Timeout(AGENT_HTTP_TIMEOUT, connect=5.0))
-    policy.config()  # сразу проверить, что конфиг читается
-    log.info("модули: %s", list(modules.enabled()))
+    profiles.store.migrate_from_yaml(policy.config().get("import_profiles") or {})
+    log.info("модули: %s, профили: %s", list(modules.enabled()), [p.id for p in profiles.store.all()])
+    if not admin.ADMIN_PASSWORD_HASH:
+        log.warning("ADMIN_PASSWORD_HASH не задан — /admin не пустит никого")
     if not ADMIN_TOKEN:
         log.warning("ADMIN_TOKEN не задан — /control выключен")
     yield
@@ -98,6 +102,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="kids-speaker gateway", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(admin.router)
 
 
 def _same(a: str | None, b: str) -> bool:
@@ -209,8 +214,8 @@ def _say_time(dt) -> str:
 
 
 async def handle_parent_command(text: str, can_relax: bool) -> dict | None:
-    cfg = policy.config()
-    cmd = parent_commands.parse(text, cfg.get("profiles") or {}, policy.now())
+    kids = {pid: policy.profile(pid) for pid in policy.children()}
+    cmd = parent_commands.parse(text, kids, policy.now())
     if not cmd:
         return None
     names = ""
@@ -234,9 +239,9 @@ async def _answer(text: str, reply: str, action: dict | None, lim: dict, **extra
             "action": to_pi(action), "limits": lim, **extra}
 
 
-def available_modules(res) -> dict[str, str]:
-    """Модули, которые сейчас можно включать: включённые ∩ разрешённые режимом."""
-    return modules.titles(policy.mode_modules(res))
+def available_modules(res, speaker: str | None) -> dict[str, str]:
+    """Модули, которые сейчас можно включать: включённые ∩ режим ∩ роль/профиль говорящего."""
+    return modules.titles(policy.allowed_modules(res, policy.access(speaker)))
 
 
 async def handle_text(device_id: str, text: str, speaker: str | None,
@@ -279,7 +284,7 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
     try:
         r = await http.post(f"{AGENT_URL}/chat", json={
             "device_id": device_id, "text": text,
-            "context": policy.agent_context(res, speaker, available_modules(res)),
+            "context": policy.agent_context(res, speaker, available_modules(res, speaker)),
         })
         r.raise_for_status()
         data = r.json()
@@ -302,7 +307,7 @@ async def enforce(action: dict | None, reply: str, res, lim: dict, device_id: st
             item = {k: action.get(k) for k in ("source", "item_id", "tags", "age_min")}
         else:
             item = await playing_item(device_id, *playing)
-        deny = policy.check_playback(res, item, policy.profile(speaker).get("age"))
+        deny = policy.check_playback(res, item, policy.access(speaker))
         if deny:
             action, reply = ({"type": "stop"} if action["type"] != "play" else None), deny
         else:

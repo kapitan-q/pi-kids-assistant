@@ -68,9 +68,9 @@ def test_check_playback_age(at):
     at(2026, 11, 16, 12)
     res = policy.resolve(None)
     item = {"source": "books", "tags": [], "age_min": 8}
-    assert policy.check_playback(res, item, age=6)
-    assert policy.check_playback(res, item, age=9) is None
-    assert policy.check_playback(res, item, age=None) is None
+    assert policy.check_playback(res, item, {"age": 6})
+    assert policy.check_playback(res, item, {"age": 9}) is None
+    assert policy.check_playback(res, item, {"age": None}) is None
 
 
 def test_check_playback_modules(at, monkeypatch):

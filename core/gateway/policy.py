@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo
 import yaml
 
 import lang
+import profiles
 
 log = logging.getLogger("policy")
 
-CONFIG_PATH = Path(os.getenv("POLICY_FILE", "/config/policies.yaml"))
+CONFIG_PATH = Path(os.getenv("POLICY_FILE", "/config/speaker.yaml"))
 STATE_PATH = Path(os.getenv("STATE_FILE", "/data/state/state.json"))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DEFAULT_CONFIG = {"modes": {"normal": {}}, "schedule": [{"mode": "normal"}]}
@@ -63,21 +64,51 @@ def mode_conf(name: str) -> dict:
 
 
 def profile(speaker: str | None) -> dict:
-    if not speaker:
-        return {}
-    return (config().get("profiles") or {}).get(speaker, {})
+    """Профиль говорящего ({} — не узнан или нет такого)."""
+    p = profiles.store.get(speaker)
+    return p.model_dump() if p else {}
+
+
+def guest_role() -> str:
+    return config().get("guest_role", "guest")
+
+
+def role_of(speaker: str | None) -> str:
+    return profile(speaker).get("role") or guest_role()
+
+
+def role_conf(role: str) -> dict:
+    return (config().get("roles") or {}).get(role, {})
 
 
 def is_parent(speaker: str | None) -> bool:
-    return profile(speaker).get("role") == "parent"
+    return bool(speaker) and bool(role_conf(role_of(speaker)).get("parent"))
+
+
+def children() -> list[str]:
+    """id профилей, на которых действуют детские правила (все, кроме родителей)."""
+    return [p.id for p in profiles.store.all() if not role_conf(p.role).get("parent")]
 
 
 def speaker_matches(who: list | None, speaker: str | None) -> bool:
+    """who в правилах и командах — id профилей и/или имена ролей (who: [child])."""
     if not who:
         return True
     if speaker is None:
         return bool(config().get("unknown_speaker_matches", True))
-    return speaker in who
+    return speaker in who or role_of(speaker) in who
+
+
+def access(speaker: str | None) -> dict:
+    """Что можно этому говорящему: роль (yaml) сужается личными ограничениями (админка).
+    {"modules": [..] | None (любые), "tags_deny": set, "age": int | None}"""
+    p = profile(speaker)
+    role = role_conf(role_of(speaker))
+    mods = role.get("modules")
+    if p.get("modules") is not None:
+        mods = [m for m in p["modules"] if mods is None or m in mods]
+    deny = {t.lower() for t in (role.get("tags_deny") or []) + (p.get("tags_deny") or [])}
+    return {"modules": mods, "tags_deny": deny, "age": p.get("age")}
 
 
 # ---------- состояние ----------
@@ -295,8 +326,7 @@ def relax(who: list[str] | None = None) -> int:
                 add_override(default, res.until, [sp])
         return removed
     # для всех: проверяем неизвестного говорящего и каждого ребёнка
-    speakers = [None] + [pid for pid, p in (config().get("profiles") or {}).items()
-                         if p.get("role") != "parent"]
+    speakers = [None] + children()
     untils = [r.until for r in map(resolve, speakers)
               if r.source == "schedule" and r.mode != default and r.until]
     if untils:
@@ -310,16 +340,27 @@ def mode_modules(res: Resolved) -> list[str] | None:
     return list(mods) if mods is not None else None
 
 
-def check_playback(res: Resolved, item: dict | None, age: int | None = None) -> str | None:
+def allowed_modules(res: Resolved, acc: dict | None) -> list[str] | None:
+    """Режим ∩ доступ говорящего (None — любые)."""
+    out = mode_modules(res)
+    mods = (acc or {}).get("modules")
+    if mods is not None:
+        out = [m for m in mods if out is None or m in out]
+    return out
+
+
+def check_playback(res: Resolved, item: dict | None, acc: dict | None = None) -> str | None:
     """Можно ли сейчас включить/продолжить item = {"source", "tags": [..] | None, "age_min"}.
+    acc — access(speaker): модули, запрещённые теги, возраст.
     item=None — ничего не играет (продолжать нечего, проверяем только режим и бюджет).
     tags=None — что играет, известно, а теги узнать не удалось: если режим требует теги — нельзя.
     None — можно; иначе фраза, которую сказать ребёнку."""
+    acc = acc or {}
     if not children_allowed(res):
         return res.conf.get("message") or lang.t("blocked_default")
     if item is not None:
-        allowed_modules = mode_modules(res)
-        if allowed_modules is not None and item.get("source") not in allowed_modules:
+        mods = allowed_modules(res, acc)
+        if mods is not None and item.get("source") not in mods:
             return res.conf.get("modules_message") or lang.t("module_denied")
     remaining = budget_remaining_sec(res)
     if remaining is not None and remaining <= 0:
@@ -330,7 +371,9 @@ def check_playback(res: Resolved, item: dict | None, age: int | None = None) -> 
     tags = item.get("tags")
     if allowed_tags and (tags is None or not allowed_tags & {t.lower() for t in tags}):
         return res.conf.get("tags_message") or lang.t("tags_default")
-    if age is not None and (item.get("age_min") or 0) > age:
+    if acc.get("tags_deny") and tags is not None and acc["tags_deny"] & {t.lower() for t in tags}:
+        return lang.t("tags_default")
+    if acc.get("age") is not None and (item.get("age_min") or 0) > acc["age"]:
         return lang.t("age_denied")
     return None
 

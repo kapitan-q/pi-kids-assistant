@@ -18,6 +18,11 @@ services:
       - traefik.http.middlewares.kids-speaker-auth.basicauth.removeheader=true
       - traefik.http.middlewares.kids-speaker-body.buffering.maxRequestBodyBytes=5000000
       - traefik.http.services.kids-speaker.loadbalancer.server.port=8080
+      # /admin — мини-админка профилей: свой вход (пароль родителя проверяет gateway), без basic-auth колонки
+      - traefik.http.routers.kids-speaker-admin.rule=Host(`${KS_HOST}`) && (Path(`/admin`) || PathPrefix(`/admin/`))
+      - traefik.http.routers.kids-speaker-admin.entrypoints=websecure
+      - traefik.http.routers.kids-speaker-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}
+      - traefik.http.routers.kids-speaker-admin.service=kids-speaker
 
 networks:
   webnet:

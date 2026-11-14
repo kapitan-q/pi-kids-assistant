@@ -6,11 +6,17 @@ from pathlib import Path
 import pytest
 
 TMP = Path(tempfile.mkdtemp())
-CONFIG = TMP / "policies.yaml"
+CONFIG = TMP / "speaker.yaml"
 CONFIG.write_text("""
 timezone: Europe/Belgrade
 unknown_speaker_matches: true
-profiles:
+roles:
+  parent: {title: Родитель, parent: true}
+  child: {title: Ребёнок, modules: [books]}
+  newcomer: {title: Новичок, modules: [books]}
+  guest: {title: Гость, modules: [books]}
+guest_role: guest
+import_profiles:
   dad: {name: Папа, role: parent}
   older: {name: Старший, role: child, age: 9, aliases: [старш]}
   younger: {name: Младший, role: child, age: 7, aliases: [младш]}
@@ -28,9 +34,13 @@ schedule:
 """, "utf-8")
 os.environ["POLICY_FILE"] = str(CONFIG)
 os.environ["STATE_FILE"] = str(TMP / "state.json")
+os.environ["CORE_DATA_DIR"] = str(TMP / "core")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import policy  # noqa: E402
+import profiles  # noqa: E402
+
+profiles.store.migrate_from_yaml(policy.config()["import_profiles"])
 
 
 @pytest.fixture(autouse=True)

@@ -29,9 +29,12 @@ services:
       QUICK_COMMANDS: ${QUICK_COMMANDS:-1}
       AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-40}
       MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-5000000}
+      ADMIN_USER: ${ADMIN_USER:-parent}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}   # /admin: bcrypt пароля родителя
     volumes:
-      - ./config:/config:ro          # policies.yaml, modules.yaml, lang/ — правятся на лету
+      - ./config:/config:ro          # speaker.yaml, modules.yaml, lang/ — правятся на лету
       - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
+      - ./data/core:/data/core       # профили и голоса
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
       interval: 30s

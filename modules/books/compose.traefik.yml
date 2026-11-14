@@ -33,12 +33,12 @@ services:
       - traefik.http.routers.kids-speaker-abs.entrypoints=websecure
       - traefik.http.routers.kids-speaker-abs.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}
       - traefik.http.routers.kids-speaker-abs.service=kids-speaker-abs
-      - traefik.http.routers.kids-speaker-books.rule=Host(`${KS_HOST}`) && (Path(`/books`) || PathPrefix(`/books/`) || Path(`/admin`) || PathPrefix(`/admin/`))
+      - traefik.http.routers.kids-speaker-books.rule=Host(`${KS_HOST}`) && (Path(`/books`) || PathPrefix(`/books/`))
       - traefik.http.routers.kids-speaker-books.entrypoints=websecure
       - traefik.http.routers.kids-speaker-books.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}
       - traefik.http.routers.kids-speaker-books.middlewares=kids-speaker-books-redirect
       - traefik.http.routers.kids-speaker-books.service=kids-speaker-abs
-      - traefik.http.middlewares.kids-speaker-books-redirect.redirectregex.regex=^https://([^/]+)/(admin|books).*
+      - traefik.http.middlewares.kids-speaker-books-redirect.redirectregex.regex=^https://([^/]+)/books.*
       - traefik.http.middlewares.kids-speaker-books-redirect.redirectregex.replacement=https://$${1}/audiobookshelf/
       - traefik.http.services.kids-speaker-abs.loadbalancer.server.port=80
 

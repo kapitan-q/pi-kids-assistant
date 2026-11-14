@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Колонка — профили</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
+    --accent: #2f6f5e; --accent-text: #ffffff; --danger: #b3412f; --chip: #eef3f1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513; --card: #211f1c; --text: #ece8e1; --muted: #a39d93; --line: #35322d;
+      --accent: #5fb39b; --accent-text: #10201b; --danger: #e07a66; --chip: #24302c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 16px; margin-bottom: 14px; }
+  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .name { font-size: 18px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 9px;
+          font-size: 12px; margin-left: 6px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin-top: 12px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  .mods { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .mods label { display: inline-flex; gap: 6px; align-items: center; color: var(--text); font-size: 14px; margin: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+  button { font: inherit; border-radius: 8px; padding: 7px 14px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  .status { font-size: 13px; color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 32px 0; }
+  .help { color: var(--muted); font-size: 13px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Профили колонки</h1>
+  <p class="lead">Новый профиль появляется, когда человек скажет колонке «давай познакомимся».
+    Здесь назначаются роль и ограничения.</p>
+  <div id="list"><div class="empty">Загружаю…</div></div>
+  <p class="help">Роли и режимы описаны в <code>config/speaker.yaml</code>. Личные ограничения только сужают роль.
+    «Объединить» переносит записанный голос в другой профиль (например, в «Старший»),
+    чтобы правила расписания для него продолжили работать.</p>
+</main>
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let data = null;
+
+function when(ts) {
+  if (!ts) return "ещё не узнавала";
+  const d = new Date(ts * 1000);
+  return "узнала " + d.toLocaleString("ru-RU", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
+}
+
+async function api(method, path, body) {
+  const r = await fetch("/admin/api" + path, {method, headers: {"Content-Type": "application/json"},
+                                               body: body ? JSON.stringify(body) : undefined});
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+  return r.json();
+}
+
+function card(p) {
+  const roleOpts = Object.entries(data.roles).map(([k, r]) =>
+    `<option value="${esc(k)}" ${k === p.role ? "selected" : ""}>${esc(r.title)}</option>`).join("");
+  const roleMods = data.roles[p.role]?.modules;
+  const own = p.modules !== null;
+  const mods = Object.entries(data.modules).map(([k, t]) => {
+    const allowedByRole = !roleMods || roleMods.includes(k);
+    const checked = own ? p.modules.includes(k) : allowedByRole;
+    return `<label><input type="checkbox" name="mod" value="${esc(k)}" ${checked ? "checked" : ""}
+            ${allowedByRole ? "" : "disabled"}> ${esc(t)}</label>`;
+  }).join("") || '<span class="status">модулей нет</span>';
+  const others = data.profiles.filter(o => o.id !== p.id)
+    .map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join("");
+  const voice = p.voice.samples ? `голос: ${p.voice.samples} образц.` : "голос не записан";
+  return `<div class="card" data-id="${esc(p.id)}">
+    <div class="head">
+      <div class="name">${esc(p.name)}<span class="chip">${esc(data.roles[p.role]?.title || p.role)}</span></div>
+      <div class="meta">${esc(voice)} · ${esc(when(p.last_seen))} · id ${esc(p.id)}</div>
+    </div>
+    <div class="grid">
+      <div><label>Имя</label><input type="text" name="name" value="${esc(p.name)}" maxlength="40"></div>
+      <div><label>Роль</label><select name="role">${roleOpts}</select></div>
+      <div><label>Возраст</label><input type="number" name="age" min="1" max="120" value="${esc(p.age ?? "")}"></div>
+      <div><label>Как называют в командах (через запятую)</label>
+        <input type="text" name="aliases" value="${esc(p.aliases.join(", "))}" placeholder="старш"></div>
+      <div><label>Модули ${own ? "(личное ограничение)" : "(как у роли)"}</label><div class="mods">${mods}</div></div>
+      <div><label>Запрещённые теги (через запятую)</label>
+        <input type="text" name="tags_deny" value="${esc(p.tags_deny.join(", "))}" placeholder="страшные"></div>
+    </div>
+    <div class="actions">
+      <button class="primary" data-act="save">Сохранить</button>
+      ${others ? `<select name="into" aria-label="Объединить с">${others}</select>
+                  <button data-act="merge">Объединить</button>` : ""}
+      <button class="danger" data-act="delete">Удалить</button>
+      <span class="status"></span>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const list = $("#list");
+  list.innerHTML = data.profiles.length ? data.profiles.map(card).join("")
+    : '<div class="empty">Пока никого. Скажите колонке «давай познакомимся».</div>';
+}
+
+async function load() {
+  try { data = await api("GET", "/profiles"); render(); }
+  catch (e) { $("#list").innerHTML = `<div class="empty">Не загрузилось: ${esc(e.message)}</div>`; }
+}
+
+$("#list").addEventListener("click", async ev => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const el = btn.closest(".card"), id = el.dataset.id, status = $(".status", el);
+  const val = n => $(`[name=${n}]`, el).value;
+  const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
+  try {
+    if (btn.dataset.act === "save") {
+      const roleMods = data.roles[val("role")]?.modules;
+      const checked = [...el.querySelectorAll("[name=mod]:checked")].map(i => i.value);
+      const allByRole = Object.keys(data.modules).filter(k => !roleMods || roleMods.includes(k));
+      const same = allByRole.length === checked.length && allByRole.every(k => checked.includes(k));
+      const age = val("age");
+      await api("PATCH", "/profiles/" + id, {
+        name: val("name"), role: val("role"), aliases: split(val("aliases")), tags_deny: split(val("tags_deny")),
+        ...(age ? {age: Number(age)} : {clear_age: true}),
+        ...(same ? {inherit_modules: true} : {modules: checked}),
+      });
+      status.textContent = "Сохранено";
+      await load();
+    } else if (btn.dataset.act === "merge") {
+      const into = val("into"), target = data.profiles.find(p => p.id === into);
+      if (!confirm(`Перенести голос в профиль «${target.name}» и удалить этот профиль?`)) return;
+      await api("POST", `/profiles/${id}/merge`, {into});
+      await load();
+    } else if (btn.dataset.act === "delete") {
+      if (!confirm("Удалить профиль вместе с записанным голосом?")) return;
+      await api("DELETE", "/profiles/" + id);
+      await load();
+    }
+  } catch (e) { status.textContent = "Ошибка: " + e.message; }
+});
+
+load();
+</script>
+</body>
+</html>
