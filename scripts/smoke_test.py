@@ -41,7 +41,7 @@ def call(method: str, path: str, body=None, admin=False, auth=True):
 
 def say(text: str, now_playing=None) -> dict:
     t0 = time.monotonic()
-    _, d = call("POST", "/text", {"device_id": DEVICE, "text": text,
+    _, d = call("POST", "/text", {"device_id": DEVICE, "text": text, "source": "books" if now_playing else None,
                                   "now_playing": str(now_playing) if now_playing else None})
     d["_ms"] = int((time.monotonic() - t0) * 1000)
     return d
@@ -68,7 +68,8 @@ section("Доступ")
 check("без пароля — 401", call("GET", "/health", auth=False)[0] == 401)
 check("админка без токена — 401", call("GET", "/control/status")[0] == 401)
 st, h = call("GET", "/health")
-check(f"все сервисы живы {h and h.get('services')}", st == 200 and h["ok"])
+check(f"ядро живо {h and h.get('core')}", st == 200 and h["ok"])
+check(f"модули живы {h and h.get('modules')}", st == 200 and all((h.get("modules") or {"-": False}).values()))
 call("DELETE", "/control/override", admin=True)          # обычный режим, даже если по расписанию ночь
 call("POST", "/reset", {"device_id": DEVICE})
 
@@ -77,10 +78,18 @@ section("Обычный режим")
 d = say("включи мойдодыра")
 a = d.get("action") or {}
 check("«включи мойдодыра» → play Мойдодыр", kind(d) == "play" and a.get("title") == "Мойдодыр", d)
-kolobok_id = a.get("tale_id")
+kolobok_id = a.get("item_id")
+check("play: source=books, url модуля, компат-поле tale_id", a.get("source") == "books"
+      and "/m/books/stream/" in a.get("url", "") and a.get("tale_id") == kolobok_id, d)
 if a.get("url"):
-    req = urllib.request.Request(a["url"], method="HEAD", headers={"Authorization": AUTH})
-    check("mp3 по url отдаётся (с basic-auth)", urllib.request.urlopen(req, timeout=10).status == 200)
+    req = urllib.request.Request(a["url"], headers={"Authorization": AUTH, "Range": "bytes=0-99"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        check("mp3 по url: с basic-auth Range → 206", r.status == 206 and len(r.read()) == 100)
+    try:
+        urllib.request.urlopen(urllib.request.Request(a["url"], method="HEAD"), timeout=10)
+        check("mp3 без basic-auth → 401", False)
+    except urllib.error.HTTPError as e:
+        check("mp3 без basic-auth → 401", e.code == 401)
 if d.get("speech_url"):
     req = urllib.request.Request(d["speech_url"], headers={"Authorization": AUTH})
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -102,13 +111,13 @@ check("«потише» → volume change < 0", kind(d) == "volume" and (a.get("
 d = say("громкость пятьдесят", kolobok_id)
 check("«громкость пятьдесят» → volume level 50", kind(d) == "volume" and (d.get("action") or {}).get("level") == 50, d)
 d = say("включи сказку о рыбаке и рыбке")
-rybka_id = (d.get("action") or {}).get("tale_id")
+rybka_id = (d.get("action") or {}).get("item_id")
 check("«о рыбаке и рыбке» → play", kind(d) == "play" and "рыб" in (d.get("action") or {}).get("title", "").lower(), d)
-call("POST", "/progress", {"tale_id": rybka_id, "position": 300})      # «остановились» на 5-й минуте
+call("POST", "/progress", {"source": "books", "item_id": rybka_id, "position": 300})   # «остановились» на 5-й минуте
 d = say("включи сказку о рыбаке и рыбке")
 a = d.get("action") or {}
 check("повторно — продолжает с того места (start ≈ 300)", kind(d) == "play" and 290 <= (a.get("start") or 0) <= 310, d)
-call("POST", "/progress", {"tale_id": rybka_id, "position": 0})        # вернуть в начало
+call("POST", "/progress", {"tale_id": rybka_id, "position": 0})   # вернуть в начало (старый формат Pi)
 d = say("почему небо голубое?")
 check("вопрос «почему небо голубое» → ответ без команды", kind(d) is None and len(d.get("reply", "")) > 10, d)
 d = say("включи любую сказку")
@@ -129,7 +138,7 @@ call("POST", "/control/override", {"mode": "night", "minutes": 10}, admin=True)
 call("POST", "/reset", {"device_id": DEVICE})
 d = say("включи сказку про рыбака и рыбку")
 a = d.get("action") or {}
-check("ночью «рыбка» (не на ночь) → не включается", kind(d) is None or "на ночь" in a.get("tags", ""), d)
+check("ночью «рыбка» (не на ночь) → не включается", kind(d) is None or "на ночь" in a.get("tags", []), d)
 d = say("включи мойдодыра")
 lim = d.get("limits") or {}
 check("ночью «мойдодыр» (на ночь) → play + таймер", kind(d) == "play" and lim.get("stop_after_sec") and lim.get("max_volume") == 30, d)

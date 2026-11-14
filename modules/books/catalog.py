@@ -73,6 +73,10 @@ def _norm(text: str) -> str:
     return (text or "").lower().replace("ё", "е")
 
 
+def tag_list(tags: str) -> list[str]:
+    return [t.strip() for t in (tags or "").split(",") if t.strip()]
+
+
 def score(tale: dict, stems: list[str]) -> int:
     """Совпадение с начала слова важнее совпадения внутри слова («лис» в «Василисе»)."""
     head = _norm(tale["title"] + " " + tale["tags"])
@@ -224,20 +228,29 @@ class Catalog:
 
     # --- для инструментов и шлюза
 
-    def media_path(self, tale: dict) -> str | None:
-        """Путь для шлюза: library/<rel> или merged/<id>.mp3. None — пока нечего играть."""
+    def audio_file(self, tale: dict) -> Path | None:
+        """Что играть: единственный файл книги или склеенный mp3. None — пока нечего."""
         if not tale["files"]:
             return None
         if len(tale["files"]) == 1:
-            return "media/" + tale["files"][0][0]
-        return "merged/" + f"{tale['id']}.mp3" if self._merged_path(tale).exists() else None
+            return LIBRARY_DIR / tale["files"][0][0]
+        merged = self._merged_path(tale)
+        return merged if merged.exists() else None
+
+    def player(self, tale: dict) -> dict:
+        """Команда плееру колонки (контракт модуля): путь — относительно /m/books/, url строит ядро."""
+        act = {"type": "play", "item_id": tale["id"], "title": tale["title"],
+               "tags": tag_list(tale["tags"]), "age_min": tale["age_min"], "path": f"stream/{tale['id']}"}
+        if (start := self.resume_from(tale)) is not None:
+            act["start"] = start
+        return act
 
     def public(self, tale: dict) -> dict:
         d = {k: tale[k] for k in ("id", "title", "author", "description", "tags",
                                   "age_min", "age_max", "duration_sec")}
         if tale["duration_sec"]:
             d["minutes"] = round(tale["duration_sec"] / 60)
-        d["has_audio"] = self.media_path(tale) is not None
+        d["has_audio"] = self.audio_file(tale) is not None
         return d
 
     def _filtered(self, age, max_minutes, tag) -> list[dict]:
@@ -268,7 +281,7 @@ class Catalog:
         return [self.public(t) for _, t in scored[:limit]]
 
     def random(self, tag=None, age=None, max_minutes=None) -> dict | None:
-        pool = [t for t in self._filtered(age, max_minutes, tag) if self.media_path(t)]
+        pool = [t for t in self._filtered(age, max_minutes, tag) if self.audio_file(t)]
         if not pool:
             return None
         # реже слушанные выпадают чаще
@@ -281,7 +294,7 @@ class Catalog:
 
     def list_tags(self) -> list[str]:
         self.ensure_fresh()
-        return sorted({tg.strip().lower() for t in self.tales.values() for tg in t["tags"].split(",") if tg.strip()})
+        return sorted({tg.lower() for t in self.tales.values() for tg in tag_list(t["tags"])})
 
     # --- прогресс прослушивания (пользователь колонки в ABS)
 

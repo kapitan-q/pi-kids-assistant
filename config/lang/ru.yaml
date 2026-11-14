@@ -1,0 +1,25 @@
+# Фразы ядра, которые слышит ребёнок или родитель. Язык выбирается LANG в .env (по умолчанию ru).
+# {…} — подстановки.
+fallback: "Ой, у меня что-то не получилось. Попробуй ещё раз."
+blocked_default: "Сейчас сказки нельзя."
+budget_default: "Пора отдыхать."
+tags_default: "Сейчас эту сказку включить нельзя."
+module_denied: "Это сейчас включить нельзя."
+age_denied: "Эта сказка для ребят постарше. Давай выберем другую."
+budget_over_context: "Время сказок на сейчас закончилось: новые сказки не включай, ласково предложи отдыхать."
+context_speaker: "Говорит: {name}"
+context_speaker_age: "Говорит: {name}, {age} лет"
+context_tags: "Сейчас можно включать только сказки с тегами: {tags}"
+context_modules: "Доступно: {modules}"
+context_unknown: "Говорящий не узнан по голосу"
+
+parent:
+  ok_mode: "Хорошо. {title}{names} до {time}."
+  ok_clear: "Хорошо, обычный режим{names}."
+  relax_denied: "Снять режим можно только с телефона."
+  not_understood: "Не поняла команду."
+  for_names: " для {names}"
+
+time:
+  hours: "{h} часов"
+  hours_minutes: "{h} {m:02d}"

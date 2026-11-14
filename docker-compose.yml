@@ -23,7 +23,6 @@ services:
       STT_URL: http://stt:8000
       TTS_URL: http://tts:8000
       AGENT_URL: http://agent:8000
-      TALES_URL: http://books:8000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?укажи PUBLIC_BASE_URL в .env}
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
@@ -31,10 +30,8 @@ services:
       AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-40}
       MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-5000000}
     volumes:
-      - ./library:/library:ro
-      - ./config:/config:ro          # policies.yaml — правится на лету
+      - ./config:/config:ro          # policies.yaml, modules.yaml, lang/ — правятся на лету
       - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
-      - ./data/merged:/merged:ro     # склеенные книги (готовит модуль books)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
       interval: 30s
@@ -55,14 +52,13 @@ services:
       TZ: ${TZ:-Europe/Belgrade}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?укажи ANTHROPIC_API_KEY в .env}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
-      TALES_MCP_URL: http://books:8000/mcp
       SESSION_IDLE_SEC: ${SESSION_IDLE_SEC:-600}
       AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-30}
       AGENT_EFFORT: ${AGENT_EFFORT:-}
       ALLOWED_DEVICES: ${ALLOWED_DEVICES:-}
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
     volumes:
-      - ./core/agent/system_prompt.md:/app/system_prompt.md:ro
+      - ./config:/config:ro          # modules.yaml, lang/
       - ./data/logs:/data/logs
     mem_limit: 1g
     healthcheck:

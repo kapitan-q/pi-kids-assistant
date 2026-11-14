@@ -16,13 +16,14 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+import lang
+
 log = logging.getLogger("policy")
 
 CONFIG_PATH = Path(os.getenv("POLICY_FILE", "/config/policies.yaml"))
 STATE_PATH = Path(os.getenv("STATE_FILE", "/data/state/state.json"))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-DEFAULT_CONFIG = {"timezone": "UTC", "modes": {"normal": {"title": "Обычный режим"}},
-                  "schedule": [{"mode": "normal"}]}
+DEFAULT_CONFIG = {"modes": {"normal": {}}, "schedule": [{"mode": "normal"}]}
 
 
 # ---------- конфиг с горячей перезагрузкой ----------
@@ -49,7 +50,8 @@ def config() -> dict:
 
 
 def tz() -> ZoneInfo:
-    return ZoneInfo(config().get("timezone", "UTC"))
+    """Часовой пояс — TZ контейнера; в yaml только если нужно переопределить."""
+    return ZoneInfo(config().get("timezone") or os.getenv("TZ") or "UTC")
 
 
 def now() -> datetime:
@@ -235,20 +237,24 @@ def limits(res: Resolved) -> dict:
     }
 
 
-def agent_context(res: Resolved, speaker: str | None) -> str | None:
+def agent_context(res: Resolved, speaker: str | None, modules: dict[str, str] | None = None) -> str | None:
+    """Служебная пометка для агента: кто говорит, режим, что доступно.
+    modules — {имя: название} модулей, доступных говорящему сейчас."""
     parts = []
     p = profile(speaker)
     if p:
-        who = p.get("name", speaker)
-        parts.append(f"Говорит: {who}" + (f", {p['age']} лет" if p.get("age") else ""))
+        name = p.get("name", speaker)
+        parts.append(lang.t("context_speaker_age", name=name, age=p["age"]) if p.get("age")
+                     else lang.t("context_speaker", name=name))
     if res.conf.get("prompt"):
         parts.append(res.conf["prompt"])
+    if modules is not None:
+        parts.append(lang.t("context_modules", modules=", ".join(modules.values()) or "—"))
     if res.conf.get("tags"):
-        parts.append("Сейчас можно включать только сказки с тегами: " + ", ".join(res.conf["tags"]))
+        parts.append(lang.t("context_tags", tags=", ".join(res.conf["tags"])))
     remaining = budget_remaining_sec(res)
     if remaining is not None and remaining <= 0:
-        parts.append("Время сказок на сейчас закончилось: новые сказки не включай, "
-                     "ласково предложи отдыхать.")
+        parts.append(lang.t("budget_over_context"))
     return "; ".join(parts) or None
 
 
@@ -298,18 +304,34 @@ def relax(who: list[str] | None = None) -> int:
     return removed
 
 
-def check_playback(res: Resolved, tale_tags: str | None) -> str | None:
-    """Можно ли сейчас играть/продолжать сказку с такими тегами.
+def mode_modules(res: Resolved) -> list[str] | None:
+    """Какие модули разрешает режим (None — любые)."""
+    mods = res.conf.get("modules")
+    return list(mods) if mods is not None else None
+
+
+def check_playback(res: Resolved, item: dict | None, age: int | None = None) -> str | None:
+    """Можно ли сейчас включить/продолжить item = {"source", "tags": [..] | None, "age_min"}.
+    item=None — ничего не играет (продолжать нечего, проверяем только режим и бюджет).
+    tags=None — что играет, известно, а теги узнать не удалось: если режим требует теги — нельзя.
     None — можно; иначе фраза, которую сказать ребёнку."""
     if not children_allowed(res):
-        return res.conf.get("message") or "Сейчас сказки нельзя."
+        return res.conf.get("message") or lang.t("blocked_default")
+    if item is not None:
+        allowed_modules = mode_modules(res)
+        if allowed_modules is not None and item.get("source") not in allowed_modules:
+            return res.conf.get("modules_message") or lang.t("module_denied")
     remaining = budget_remaining_sec(res)
     if remaining is not None and remaining <= 0:
-        return res.conf.get("budget_message", "Пора отдыхать.")
-    allowed_tags = [t.lower() for t in res.conf.get("tags") or []]
-    if allowed_tags and tale_tags is not None and \
-            not any(t in tale_tags.lower() for t in allowed_tags):
-        return res.conf.get("tags_message", "Сейчас эту сказку включить нельзя.")
+        return res.conf.get("budget_message") or lang.t("budget_default")
+    if item is None:
+        return None
+    allowed_tags = {t.lower() for t in res.conf.get("tags") or []}
+    tags = item.get("tags")
+    if allowed_tags and (tags is None or not allowed_tags & {t.lower() for t in tags}):
+        return res.conf.get("tags_message") or lang.t("tags_default")
+    if age is not None and (item.get("age_min") or 0) > age:
+        return lang.t("age_denied")
     return None
 
 

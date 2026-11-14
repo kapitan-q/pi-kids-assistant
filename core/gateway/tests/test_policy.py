@@ -58,9 +58,27 @@ def test_relax_removes_overrides(at):
 def test_check_playback_night(at):
     at(2026, 11, 16, 23)
     res = policy.resolve(None)
-    assert policy.check_playback(res, "животные") == "tags"
-    assert policy.check_playback(res, "животные, на ночь") is None
-    assert policy.check_playback(res, None) is None  # неизвестная сказка — только бюджет
+    assert policy.check_playback(res, {"source": "books", "tags": ["животные"]}) == "tags"
+    assert policy.check_playback(res, {"source": "books", "tags": ["животные", "На ночь"]}) is None
+    assert policy.check_playback(res, None) is None                      # ничего не играет — только бюджет
+    assert policy.check_playback(res, {"source": "books", "tags": None}) == "tags"   # теги неизвестны — нельзя
+
+
+def test_check_playback_age(at):
+    at(2026, 11, 16, 12)
+    res = policy.resolve(None)
+    item = {"source": "books", "tags": [], "age_min": 8}
+    assert policy.check_playback(res, item, age=6)
+    assert policy.check_playback(res, item, age=9) is None
+    assert policy.check_playback(res, item, age=None) is None
+
+
+def test_check_playback_modules(at, monkeypatch):
+    at(2026, 11, 16, 12)
+    res = policy.resolve(None)
+    res.conf = {**res.conf, "modules": ["books"]}
+    assert policy.check_playback(res, {"source": "youtube", "tags": []})
+    assert policy.check_playback(res, {"source": "books", "tags": []}) is None
 
 
 def test_check_playback_budget(at, monkeypatch):
@@ -68,10 +86,10 @@ def test_check_playback_budget(at, monkeypatch):
     res = policy.resolve(None)
     policy.start_budget(res)
     policy.state.data["budgets"][res.key] -= 61 * 60
-    assert policy.check_playback(res, "на ночь") == "budget"
+    assert policy.check_playback(res, {"source": "books", "tags": ["на ночь"]}) == "budget"
 
 
 def test_check_playback_blocked(at):
     now = at(2026, 11, 16, 12)
     policy.add_override("quiet", now + timedelta(hours=1))
-    assert policy.check_playback(policy.resolve(None), "на ночь")
+    assert policy.check_playback(policy.resolve(None), {"source": "books", "tags": ["на ночь"]})

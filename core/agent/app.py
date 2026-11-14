@@ -1,25 +1,30 @@
-"""Агент: Claude Agent SDK + MCP-сервер сказок.
+"""Агент: Claude Agent SDK + MCP-серверы модулей из config/modules.yaml + встроенный player.
 
-POST /chat  {"device_id": "kids-room", "text": "включи колобка"}
-  -> {"reply": "Включаю сказку Колобок", "action": {"type": "play", "tale_id": 3}}
+POST /chat  {"device_id": "kids-room", "text": "включи колобка", "context": "..."}
+  -> {"reply": "Включаю сказку Колобок",
+      "action": {"type": "play", "source": "books", "item_id": "...", "path": "...", ...} | null}
 POST /reset {"device_id": "..."}  — начать разговор заново
+
+Команды плееру не зашиты в агенте: любой инструмент может вернуть {"player": {...}}.
+Модулю можно только включать (play) — source берётся из имени его MCP-сервера, а не из ответа;
+stop/resume/seek/volume — только у встроенного сервера player. Окончательно проверяет шлюз.
 """
 import asyncio
 import contextlib
-import dataclasses
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -28,92 +33,82 @@ from claude_agent_sdk import (
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+import player
+
 log = logging.getLogger("agent")
 logging.basicConfig(level=logging.INFO)
 
 MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-5-5")
-TALES_MCP_URL = os.getenv("TALES_MCP_URL", "http://tales:8000/mcp")
 IDLE_SEC = int(os.getenv("SESSION_IDLE_SEC", "600"))
 TURN_TIMEOUT = float(os.getenv("AGENT_TURN_TIMEOUT", "30"))
+MAX_TURNS = int(os.getenv("AGENT_MAX_TURNS", "6"))
 # Глубина «обдумывания» Claude (low|medium|high). Пусто — по умолчанию модели. low на Haiku 5.5
 # заметно не ускоряет короткие ответы, но иногда пропускает шаги — поэтому не включаем.
 EFFORT = os.getenv("AGENT_EFFORT", "").strip() or None
 ALLOWED_DEVICES = {d.strip() for d in os.getenv("ALLOWED_DEVICES", "").split(",") if d.strip()}
 LOG_DIR = Path(os.getenv("LOG_DIR", "/data/logs"))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
-SYSTEM_PROMPT = Path(os.getenv("SYSTEM_PROMPT_FILE", "/app/system_prompt.md")).read_text("utf-8")
+WORKDIR = os.getenv("AGENT_WORKDIR", "/app/workdir")
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "/config"))
+SYSTEM_PROMPT = Path(os.getenv("SYSTEM_PROMPT_FILE", Path(__file__).with_name("prompt.md"))).read_text("utf-8")
+LANG = yaml.safe_load((CONFIG_DIR / "lang" / f"{os.getenv('LANG_CODE', 'ru')}.yaml").read_text("utf-8"))
+FALLBACK_REPLY = LANG["fallback"]
 
-# Детскому агенту — только эти инструменты (add_tale не выдаём).
-KID_TOOLS = ["search_tales", "play_random_tale", "list_tags", "get_tale",
-             "play_tale", "stop_playback", "resume_playback", "seek_playback", "set_volume"]
-ALLOWED_TOOLS = [f"mcp__tales__{t}" for t in KID_TOOLS]
-# Встроенные инструменты Claude Code агенту не нужны. Если SDK умеет задавать базовый
-# набор (`tools`), отдаём пустой список — тогда никакой встроенный инструмент, даже
-# появившийся в новой версии CLI, агенту не достанется. Чёрный список — запасной вариант.
-BUILTIN_TOOLS = ["Bash", "BashOutput", "KillShell", "KillBash", "Read", "Write", "Edit",
-                 "MultiEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "Agent",
-                 "TodoWrite", "NotebookEdit", "NotebookRead", "ExitPlanMode", "SlashCommand",
-                 "Skill", "ListMcpResources", "ReadMcpResource", "ListMcpResourcesTool",
-                 "ReadMcpResourceTool"]
-_OPTION_FIELDS = {f.name for f in dataclasses.fields(ClaudeAgentOptions)}
-# Вызов этих инструментов = команда плееру на Pi
-ACTION_TOOLS = {
-    "mcp__tales__play_tale": "play",
-    "mcp__tales__play_random_tale": "play",   # tale_id приходит в результате инструмента
-    "mcp__tales__stop_playback": "stop",
-    "mcp__tales__resume_playback": "resume",
-    "mcp__tales__seek_playback": "seek",
-    "mcp__tales__set_volume": "volume",
-}
-FALLBACK_REPLY = "Ой, у меня что-то не получилось. Попробуй ещё раз."
+PLAYER_TYPES = {"stop", "resume", "seek", "volume"}   # только от встроенного player
+MODULE_TYPES = {"play"}                               # модулям — только включать
 
 
-def tale_id_from_result(content) -> str | None:
-    """play_random_tale сам выбирает сказку — её id есть только в результате инструмента.
-    id — строковый id книги в Audiobookshelf."""
-    if isinstance(content, list):
-        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-    text = str(content or "")
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict) and data.get("tale_id") is not None:
-            return str(data["tale_id"])
-    except (ValueError, TypeError):
-        pass
-    m = re.search(r'"tale_id"\s*:\s*"?([\w-]+)"?', text)
-    return m.group(1) if m else None
+def load_modules() -> dict[str, dict]:
+    """Включённые модули: имя -> настройки. Читается при создании каждой сессии."""
+    data = yaml.safe_load((CONFIG_DIR / "modules.yaml").read_text("utf-8")) or {}
+    return {name: m for name, m in (data.get("modules") or {}).items() if m.get("enabled", True)}
 
 
-def volume_action(tool_input: dict) -> dict:
-    """Нормализуем к шкале 10..100 с шагом 10.
-    {"level": 50} — выставить; {"change": -10} — сдвинуть (Pi знает текущую и сам обрежет до 10..100)."""
-    if tool_input.get("level") is not None:
-        level = round(int(tool_input["level"]) / 10) * 10
-        return {"type": "volume", "level": max(10, min(100, level))}
-    change = round(int(tool_input.get("change") or 0) / 10) * 10
-    change = max(-90, min(90, change)) or (10 if (tool_input.get("change") or 0) > 0 else -10)
-    return {"type": "volume", "change": change}
-
-
-def make_options() -> ClaudeAgentOptions:
+def make_options(modules: dict[str, dict]) -> ClaudeAgentOptions:
+    servers: dict = {name: {"type": "http", "url": m["url"].rstrip("/") + "/mcp"} for name, m in modules.items()}
+    servers[player.SERVER_NAME] = player.server
     opts = dict(
         model=MODEL,
         system_prompt=SYSTEM_PROMPT,
-        mcp_servers={"tales": {"type": "http", "url": TALES_MCP_URL}},
-        allowed_tools=ALLOWED_TOOLS,
-        disallowed_tools=BUILTIN_TOOLS,
-        max_turns=6,
-        cwd="/app/workdir",
+        mcp_servers=servers,
+        allowed_tools=[f"mcp__{name}" for name in servers],   # все инструменты этих серверов
+        tools=[],                    # никаких встроенных инструментов Claude Code
+        permission_mode="default",   # всё, что не в allowed_tools, — отказ
+        setting_sources=[],          # никаких settings.json/CLAUDE.md с диска
+        max_turns=MAX_TURNS,
+        cwd=WORKDIR,
     )
-    if EFFORT and "effort" in _OPTION_FIELDS:
+    if EFFORT:
         opts["effort"] = EFFORT
-    if "tools" in _OPTION_FIELDS:
-        opts["tools"] = []           # пустой базовый набор встроенных инструментов
-    if "permission_mode" in _OPTION_FIELDS:
-        opts["permission_mode"] = "default"   # всё, что не в allowed_tools, — отказ
-    if "setting_sources" in _OPTION_FIELDS:
-        opts["setting_sources"] = []  # никаких settings.json/CLAUDE.md с диска
     return ClaudeAgentOptions(**opts)
+
+
+def tool_server(tool_name: str) -> str | None:
+    """mcp__books__play_tale -> books"""
+    parts = tool_name.split("__")
+    return parts[1] if len(parts) >= 3 and parts[0] == "mcp" else None
+
+
+def player_from_result(server: str | None, content) -> dict | None:
+    """Команда плееру из результата инструмента: JSON-объект с полем player в одном из текстовых блоков."""
+    blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "text":
+            continue
+        try:
+            data = json.loads(b.get("text") or "")
+        except (ValueError, TypeError):
+            continue
+        act = data.get("player") if isinstance(data, dict) else None
+        if not isinstance(act, dict):
+            continue
+        kind = act.get("type")
+        if server == player.SERVER_NAME and kind in PLAYER_TYPES:
+            return {k: v for k, v in act.items() if k != "source"}
+        if server and server != player.SERVER_NAME and kind in MODULE_TYPES:
+            return {**act, "source": server}          # source — только из имени сервера
+        log.warning("отброшена команда %r от %s", kind, server)
+    return None
 
 
 class Session:
@@ -121,6 +116,7 @@ class Session:
         self.client: ClaudeSDKClient | None = None
         self.last_used = time.monotonic()
         self.lock = asyncio.Lock()
+        self.stale = False   # модуль был недоступен при старте сессии — пересоздать после хода
 
     async def close(self) -> None:
         if self.client:
@@ -129,13 +125,14 @@ class Session:
             except Exception:  # noqa: BLE001
                 log.exception("disconnect failed")
         self.client = None
+        self.stale = False
 
     async def ensure(self) -> ClaudeSDKClient:
-        if self.client and time.monotonic() - self.last_used > IDLE_SEC:
-            log.info("session idle, starting fresh")
+        if self.client and (self.stale or time.monotonic() - self.last_used > IDLE_SEC):
+            log.info("session stale/idle, starting fresh")
             await self.close()
         if self.client is None:
-            self.client = ClaudeSDKClient(options=make_options())
+            self.client = ClaudeSDKClient(options=make_options(load_modules()))
             await asyncio.wait_for(self.client.connect(), TURN_TIMEOUT)
         self.last_used = time.monotonic()
         return self.client
@@ -170,7 +167,7 @@ def prune_logs() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
-    log.info("tools: base=%s, allowed=%s", "tools" in _OPTION_FIELDS, ALLOWED_TOOLS)
+    log.info("modules: %s", list(load_modules()))
     task = asyncio.create_task(reaper())
     yield
     task.cancel()
@@ -184,7 +181,7 @@ app = FastAPI(title="agent", lifespan=lifespan, docs_url=None, redoc_url=None, o
 class ChatIn(BaseModel):
     device_id: str = "default"
     text: str
-    context: str | None = None  # служебная пометка от шлюза: кто говорит, режим
+    context: str | None = None  # служебная пометка от шлюза: кто говорит, режим, доступы
 
 
 class ResetIn(BaseModel):
@@ -198,12 +195,13 @@ def write_log(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
+async def run_turn(session: Session, text: str) -> dict:
+    client = session.client
     await client.query(text)
 
     before_tools: list[str] = []   # текст до последнего вызова инструмента
     after_tools: list[str] = []    # текст после — это и есть финальный ответ
-    pending: dict[str, dict] = {}  # tool_use_id -> action
+    calls: dict[str, str | None] = {}   # tool_use_id -> сервер
     action: dict | None = None
     cost = None
     tools_called: list[str] = []
@@ -211,32 +209,25 @@ async def run_turn(client: ClaudeSDKClient, text: str) -> dict:
     is_error = False
 
     async for msg in client.receive_response():
-        if isinstance(msg, AssistantMessage):
+        if isinstance(msg, SystemMessage) and msg.subtype == "init":
+            down = [s.get("name") for s in msg.data.get("mcp_servers") or [] if s.get("status") != "connected"]
+            if down:
+                log.warning("MCP-серверы недоступны: %s — сессия будет пересоздана", down)
+                session.stale = True
+        elif isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock) and block.text.strip():
                     after_tools.append(block.text.strip())
                 elif isinstance(block, ToolUseBlock):
                     tools_called.append(block.name)
                     before_tools, after_tools = before_tools + after_tools, []
-                    kind = ACTION_TOOLS.get(block.name)
-                    if kind:
-                        act = {"type": kind}
-                        if kind == "volume":
-                            act = volume_action(block.input)
-                        elif kind == "play":
-                            act["tale_id"] = str(block.input["tale_id"]) if block.input.get("tale_id") is not None else None
-                        elif kind == "seek":
-                            act["seconds"] = int(block.input.get("seconds", 30))
-                            act["mode"] = block.input.get("mode", "relative")
-                        pending[block.id] = act
+                    calls[block.id] = tool_server(block.name)
         elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
             for block in msg.content:
-                if isinstance(block, ToolResultBlock) and block.tool_use_id in pending:
-                    act = pending.pop(block.tool_use_id)
-                    if act["type"] == "play" and act.get("tale_id") is None:
-                        act["tale_id"] = tale_id_from_result(block.content)
-                    if not block.is_error and not (act["type"] == "play" and act.get("tale_id") is None):
-                        action = act  # play_tale с несуществующим id не включаем
+                if isinstance(block, ToolResultBlock) and block.tool_use_id in calls and not block.is_error:
+                    act = player_from_result(calls[block.tool_use_id], block.content)
+                    if act:
+                        action = act   # последняя успешная команда
         elif isinstance(msg, ResultMessage):
             cost = msg.total_cost_usd
             result_subtype = getattr(msg, "subtype", None)
@@ -264,9 +255,9 @@ async def chat(body: ChatIn):
     t0 = time.monotonic()
     async with session.lock:
         try:
-            client = await session.ensure()
+            await session.ensure()
             prompt = f"[Служебно: {body.context}]\n{body.text}" if body.context else body.text
-            result = await asyncio.wait_for(run_turn(client, prompt), TURN_TIMEOUT)
+            result = await asyncio.wait_for(run_turn(session, prompt), TURN_TIMEOUT)
         except Exception as e:  # noqa: BLE001  (в т.ч. TimeoutError)
             log.exception("agent turn failed: %r", e)
             await session.close()

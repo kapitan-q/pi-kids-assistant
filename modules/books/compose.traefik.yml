@@ -1,5 +1,25 @@
 # Публикация модуля books за Traefik (вместе с docker-compose.traefik.yml).
 services:
+  # Файлы для плеера Pi: /m/books/stream/<id> → books:/stream/<id>, за тем же basic-auth, что и колонка.
+  # Наружу — только /stream: MCP модуля остаётся внутри compose-сети.
+  # Middleware basic-auth объявлен здесь заново (с тем же значением), чтобы не зависеть от лейблов gateway.
+  books:
+    networks:
+      - default
+      - webnet
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=webnet
+      - traefik.http.routers.kids-speaker-books-stream.rule=Host(`${KS_HOST}`) && PathPrefix(`/m/books/stream/`)
+      - traefik.http.routers.kids-speaker-books-stream.entrypoints=websecure
+      - traefik.http.routers.kids-speaker-books-stream.tls.certresolver=${TRAEFIK_CERTRESOLVER:-le}
+      - traefik.http.routers.kids-speaker-books-stream.middlewares=kids-speaker-books-auth,kids-speaker-books-strip
+      - traefik.http.routers.kids-speaker-books-stream.service=kids-speaker-books
+      - traefik.http.middlewares.kids-speaker-books-auth.basicauth.users=${BASIC_AUTH_USERS:?укажи BASIC_AUTH_USERS в .env}
+      - traefik.http.middlewares.kids-speaker-books-auth.basicauth.removeheader=true
+      - traefik.http.middlewares.kids-speaker-books-strip.stripprefix.prefixes=/m/books
+      - traefik.http.services.kids-speaker-books.loadbalancer.server.port=8000
+
   # Веб-интерфейс Audiobookshelf: /audiobookshelf (фиксированный подпуть ABS), /books — редирект туда.
   # Без basic-auth: у ABS свой вход, а его приложения для телефона basic-auth не умеют.
   audiobookshelf:

@@ -66,11 +66,21 @@ def test_filters(c):
 
 def test_multifile_not_playable_until_merged(c, tmp_path):
     konek = c.tales["konek"]
-    assert c.media_path(konek) is None
+    assert c.audio_file(konek) is None
     assert c.public(konek)["has_audio"] is False
     (tmp_path / "konek.mp3").write_bytes(b"x")
-    assert c.media_path(konek) == "merged/konek.mp3"
-    assert c.media_path(c.tales["ezh"]) == "media/ezh/0.mp3"
+    assert c.audio_file(konek) == tmp_path / "konek.mp3"
+    assert c.audio_file(c.tales["ezh"]) == cat.LIBRARY_DIR / "ezh/0.mp3"
+
+
+def test_player_contract(c, monkeypatch):
+    """play_* отдают ядру команду плееру: только относительный путь, теги списком, без source и url."""
+    monkeypatch.setattr(c, "resume_from", lambda t: None)
+    p = c.player(c.tales["kuma"])
+    assert p == {"type": "play", "item_id": "kuma", "title": "О хитрой куме лисе",
+                 "tags": ["лиса", "животные"], "age_min": 6, "path": "stream/kuma"}
+    monkeypatch.setattr(c, "resume_from", lambda t: 125)
+    assert c.player(c.tales["ezh"])["start"] == 125
 
 
 def test_random_respects_tag(c):
