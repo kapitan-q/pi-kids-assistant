@@ -43,6 +43,7 @@ def main() -> int:
         missing = [str(p) for p in paths if not p.is_file()]
         if missing:
             print(f"!! {t['slug']}: нет файлов {missing}")
+            shutil.rmtree(work, ignore_errors=True)
             return 1
         meta = {k: t[k] for k in ("title", "author", "description", "tags", "age_min", "age_max") if k in t}
         if not dry:
