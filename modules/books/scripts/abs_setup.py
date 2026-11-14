@@ -2,7 +2,7 @@
 """Первичная настройка Audiobookshelf для колонки (можно запускать повторно).
 
 Запуск внутри compose-сети (порт ABS наружу не открыт):
-    docker compose run --rm --no-deps -v ./scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py
+    docker compose run --rm --no-deps -v ./modules/books/scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py
 
 Делает:
   1. создаёт администратора root (ABS_ROOT_PASSWORD), если сервер ещё не инициализирован;

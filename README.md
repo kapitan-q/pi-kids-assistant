@@ -36,7 +36,7 @@ tar czf - --exclude=.git --exclude=.env --exclude=pi-client/.venv --exclude=pi-c
 cd ~/workspace/kids-speaker && docker compose up -d --build
 ```
 
-- Первый запуск Audiobookshelf: `docker compose run --rm --no-deps -v ./scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py`
+- Первый запуск Audiobookshelf: `docker compose run --rm --no-deps -v ./modules/books/scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py`
   — создаст администратора, библиотеку «Сказки», пользователя speaker и напечатает `ABS_API_KEY`/`ABS_LIBRARY_ID` для `.env`.
 - Бэкап: `scripts/backup.sh` — cron ежедневно в 04:00: база Audiobookshelf, описания сказок и режимы в `data/backups`, 14 дней.
 - Тесты шлюза: `docker compose run --rm --no-deps gateway sh -c "pip install -q pytest && pytest -q"`.
@@ -57,7 +57,7 @@ cd ~/workspace/kids-speaker && docker compose up -d --build
   она хранится в Audiobookshelf у пользователя `speaker`.
 
 На диске: `library/<сказка>/<файлы>.mp3` + `metadata.json` (так же их видит Audiobookshelf).
-Большие сборники с заготовленными описаниями удобнее разложить `scripts/build_library.py`
+Большие сборники с заготовленными описаниями удобнее разложить `modules/books/scripts/build_library.py`
 по манифесту — части склеиваются в один mp3, рядом кладётся `metadata.json`.
 
 ## Проверка без Pi

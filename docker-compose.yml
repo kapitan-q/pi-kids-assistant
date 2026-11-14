@@ -1,8 +1,8 @@
-# Домашняя колонка-сказочница.
+# Домашняя голосовая колонка — ядро: gateway, agent, stt, tts.
+# Модули подключаются своими compose-файлами (modules/<имя>/compose.yml) через COMPOSE_FILE в .env.
 # Наружу не публикуется ни один порт. Доступ к gateway — через оверлей:
 #   docker-compose.traefik.yml — за Traefik с basic-auth (сервер titan)
 #   docker-compose.local.yml   — порт 8080 в локальной сети (вариант «дома»)
-# Нужный набор задаётся в .env через COMPOSE_FILE.
 
 x-logging: &logging
   driver: json-file
@@ -17,13 +17,13 @@ x-common: &common
 services:
   gateway:
     <<: *common
-    build: ./gateway
+    build: ./core/gateway
     environment:
       TZ: ${TZ:-Europe/Belgrade}
       STT_URL: http://stt:8000
       TTS_URL: http://tts:8000
       AGENT_URL: http://agent:8000
-      TALES_URL: http://tales:8000
+      TALES_URL: http://books:8000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?укажи PUBLIC_BASE_URL в .env}
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
@@ -34,7 +34,7 @@ services:
       - ./library:/library:ro
       - ./config:/config:ro          # policies.yaml — правится на лету
       - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
-      - ./data/merged:/merged:ro     # склеенные книги (готовит tales)
+      - ./data/merged:/merged:ro     # склеенные книги (готовит модуль books)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
       interval: 30s
@@ -47,23 +47,22 @@ services:
       stt: {condition: service_healthy}
       tts: {condition: service_healthy}
       agent: {condition: service_healthy}
-      tales: {condition: service_healthy}
 
   agent:
     <<: *common
-    build: ./agent
+    build: ./core/agent
     environment:
       TZ: ${TZ:-Europe/Belgrade}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?укажи ANTHROPIC_API_KEY в .env}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-haiku-5-5}
-      TALES_MCP_URL: http://tales:8000/mcp
+      TALES_MCP_URL: http://books:8000/mcp
       SESSION_IDLE_SEC: ${SESSION_IDLE_SEC:-600}
       AGENT_TURN_TIMEOUT: ${AGENT_TURN_TIMEOUT:-30}
       AGENT_EFFORT: ${AGENT_EFFORT:-}
       ALLOWED_DEVICES: ${ALLOWED_DEVICES:-}
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
     volumes:
-      - ./agent/system_prompt.md:/app/system_prompt.md:ro
+      - ./core/agent/system_prompt.md:/app/system_prompt.md:ro
       - ./data/logs:/data/logs
     mem_limit: 1g
     healthcheck:
@@ -72,12 +71,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    depends_on:
-      tales: {condition: service_healthy}
 
   stt:
     <<: *common
-    build: ./stt
+    build: ./core/stt
     environment:
       TZ: ${TZ:-Europe/Belgrade}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
@@ -96,7 +93,7 @@ services:
 
   tts:
     <<: *common
-    build: ./tts
+    build: ./core/tts
     environment:
       TZ: ${TZ:-Europe/Belgrade}
       PIPER_VOICE: ${PIPER_VOICE:-ru_RU-irina-medium}
@@ -110,49 +107,6 @@ services:
       retries: 3
       start_period: 300s   # первый старт качает голос Piper
 
-  tales:
-    <<: *common
-    build: ./tales
-    # MCP (/mcp) доступен только внутри compose-сети — наружу не публикуется.
-    environment:
-      TZ: ${TZ:-Europe/Belgrade}
-      ABS_URL: http://audiobookshelf
-      ABS_API_KEY: ${ABS_API_KEY:-}            # ключ пользователя speaker (scripts/abs_setup.py)
-      ABS_LIBRARY_ID: ${ABS_LIBRARY_ID:-}
-      CATALOG_REFRESH_SEC: ${CATALOG_REFRESH_SEC:-300}
-    volumes:
-      - ./library:/library:ro        # та же папка, что /audiobooks у Audiobookshelf
-      - ./data/merged:/data/merged   # склеенные многофайловые книги
-      - ./data/tales:/data           # сколько раз слушали (для случайной сказки)
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    depends_on:
-      audiobookshelf: {condition: service_healthy}
-
-  audiobookshelf:
-    <<: *common
-    image: ghcr.io/advplyr/audiobookshelf:2.37.2
-    # Каталог сказок. Веб-интерфейс: $PUBLIC_BASE_URL/audiobookshelf/ (/admin — редирект туда),
-    # вход по логину Audiobookshelf. Порт наружу не публикуется.
-    environment:
-      TZ: ${TZ:-Europe/Belgrade}
-    volumes:
-      - ./library:/audiobooks        # сюда же попадают книги, загруженные через интерфейс
-      - abs-config:/config           # база Audiobookshelf (sqlite), пользователи, прогресс
-      - abs-metadata:/metadata       # обложки, кэш
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthcheck >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
 volumes:
-  abs-config:
-  abs-metadata:
   whisper-models:
   piper-voices:

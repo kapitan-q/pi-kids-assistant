@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Разовый переезд библиотеки на раскладку Audiobookshelf.
 
-    python3 scripts/migrate_to_abs.py [library/сказки] [--dry-run]
+    python3 modules/books/scripts/migrate_to_abs.py [library/сказки] [--dry-run]
 
 Было:  library/сказки/<slug>.mp3 + <slug>.json   (наш формат: title, author, tags-строкой, age_min/max)
 Стало: library/<slug>/<slug>.mp3 + metadata.json (формат Audiobookshelf, возраст — тегом «возраст:a-b»)

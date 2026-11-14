@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Собрать библиотеку из манифеста: склеить части сказок в один mp3 и положить рядом .json.
 
-    python3 scripts/build_library.py MANIFEST.json INCOMING_DIR [--dry-run]
+    python3 modules/books/scripts/build_library.py MANIFEST.json INCOMING_DIR [--dry-run]
 
 Манифест — список сказок:
     {"slug": "konek-gorbunok", "title": "Конёк-горбунок", "author": "П. П. Ершов",

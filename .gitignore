@@ -8,3 +8,7 @@ pi-client/config.toml
 .speaker-password
 library/*
 !library/.gitkeep
+data/books/
+data/tales/
+data/merged/
+data/core/
