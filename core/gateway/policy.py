@@ -90,13 +90,23 @@ def children() -> list[str]:
     return [p.id for p in profiles.store.all() if not role_conf(p.role).get("parent")]
 
 
-def speaker_matches(who: list | None, speaker: str | None) -> bool:
-    """who в правилах и командах — id профилей и/или имена ролей (who: [child])."""
+def unverified(speaker: str | None) -> bool:
+    """Личность не подтверждена родителем: голос не узнан или роль помечена unverified
+    (новичок после знакомства — ребёнок мог представиться чужим именем)."""
+    return speaker is None or bool(role_conf(role_of(speaker)).get("unverified"))
+
+
+def speaker_matches(who: list | None, speaker: str | None, mode: str | None = None) -> bool:
+    """who в правилах и командах — id профилей и/или имена ролей (who: [child]).
+    Неподтверждённого говорящего (unknown_speaker_matches) касаются все ограничения с who —
+    но не послабления: «обычный режим для старшего» на новичка не распространяется."""
     if not who:
         return True
-    if speaker is None:
-        return bool(config().get("unknown_speaker_matches", True))
-    return speaker in who or role_of(speaker) in who
+    if speaker is not None and (speaker in who or role_of(speaker) in who):
+        return True
+    if not unverified(speaker) or mode == config().get("default_mode", "normal"):
+        return False
+    return bool(config().get("unknown_speaker_matches", True))
 
 
 def access(speaker: str | None) -> dict:
@@ -208,12 +218,12 @@ def resolve(speaker: str | None, t: datetime | None = None) -> Resolved:
         state.prune()
         overrides = list(state.data["overrides"])
     for ov in reversed(overrides):  # последняя команда главнее
-        if speaker_matches(ov.get("who"), speaker):
+        if speaker_matches(ov.get("who"), speaker, ov["mode"]):
             until = datetime.fromtimestamp(ov["until_ts"], tz())
             return Resolved(ov["mode"], mode_conf(ov["mode"]), f"ov:{ov['id']}", until, "override")
     for i, rule in enumerate(config().get("schedule") or []):
         win = rule_window(rule, t)
-        if win and speaker_matches(rule.get("who"), speaker):
+        if win and speaker_matches(rule.get("who"), speaker, rule.get("mode", "normal")):
             name = rule.get("mode", "normal")
             return Resolved(name, mode_conf(name), f"sch:{i}:{win[0]:%Y%m%d%H%M}", win[1], "schedule")
     name = config().get("default_mode", "normal")
@@ -376,6 +386,19 @@ def check_playback(res: Resolved, item: dict | None, acc: dict | None = None) ->
     if acc.get("age") is not None and (item.get("age_min") or 0) > acc["age"]:
         return lang.t("age_denied")
     return None
+
+
+def overview() -> dict:
+    """Что действует сейчас: на неузнанный голос и на каждый не родительский профиль (для /admin)."""
+    default = config().get("default_mode", "normal")
+    people = [(None, None)] + [(pid, profile(pid).get("name", pid)) for pid in children()]
+    rows = []
+    for pid, name in people:
+        r = resolve(pid)
+        rows.append({"id": pid, "name": name, "mode": r.mode, "title": r.conf.get("title", r.mode),
+                     "until": r.until.isoformat(timespec="minutes") if r.until else None,
+                     "source": r.source, "restricted": r.mode != default})
+    return {"now": now().isoformat(timespec="minutes"), "default_mode": default, "people": rows}
 
 
 def status() -> dict:

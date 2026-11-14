@@ -84,3 +84,36 @@ def test_admin_merge_moves_voice(client):
     profiles.store.migrate_from_yaml({})   # ничего не делает: файл уже есть
     profiles.store.items["older"] = profiles.Profile(id="older", name="Старший", role="child", age=9,
                                                      aliases=["старш"])
+
+
+def test_newcomer_is_under_restrictions_for_others(at):
+    """Ребёнок познакомился под чужим именем → на новичка действуют ограничения с who, но не послабления."""
+    at(2026, 11, 16, 15, 30)                                   # пн, уроки для older
+    kid = profiles.store.create("Вася", "newcomer", age=9)
+    assert policy.resolve("older").mode == "homework"
+    assert policy.resolve(kid.id).mode == "homework"
+    assert policy.resolve("younger").mode == "normal"          # подтверждённый профиль — только свои правила
+    policy.relax(["older"])                                    # родитель снял уроки старшему
+    assert policy.resolve("older").mode == "normal"
+    assert policy.resolve(kid.id).mode == "homework"           # послабление новичка не касается
+    assert policy.resolve(None).mode == "homework"
+    profiles.store.update(kid.id, role="child")                # родитель подтвердил в админке
+    assert policy.resolve(kid.id).mode == "normal"
+    policy.clear_overrides()
+    profiles.store.delete(kid.id)
+
+
+def test_admin_shows_and_relaxes_modes(client, at):
+    at(2026, 11, 16, 15, 30)
+    r = client.get("/admin/api/control", headers=auth())
+    rows = {row["id"]: row for row in r.json()["people"]}
+    assert rows["older"]["restricted"] and rows[None]["restricted"] and not rows["younger"]["restricted"]
+    assert "dad" not in rows
+    assert client.get("/admin/api/control").status_code == 401
+    assert client.post("/admin/api/control/relax", headers=auth(), json={"who": ["nope"]}).status_code == 400
+    r = client.post("/admin/api/control/relax", headers=auth(), json={"who": ["older"]})
+    rows = {row["id"]: row for row in r.json()["people"]}
+    assert not rows["older"]["restricted"] and rows[None]["restricted"]
+    r = client.post("/admin/api/control/relax", headers=auth(), json={"who": None})
+    assert not any(row["restricted"] for row in r.json()["people"])
+    policy.clear_overrides()

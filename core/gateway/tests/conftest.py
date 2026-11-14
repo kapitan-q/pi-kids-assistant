@@ -13,8 +13,8 @@ unknown_speaker_matches: true
 roles:
   parent: {title: Родитель, parent: true}
   child: {title: Ребёнок, modules: [books]}
-  newcomer: {title: Новичок, modules: [books]}
-  guest: {title: Гость, modules: [books]}
+  newcomer: {title: Новичок, modules: [books], unverified: true}
+  guest: {title: Гость, modules: [books], unverified: true}
 guest_role: guest
 import_profiles:
   dad: {name: Папа, role: parent}

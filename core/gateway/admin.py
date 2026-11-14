@@ -1,4 +1,4 @@
-"""Мини-админка /admin: список профилей, роли и личные ограничения.
+"""Мини-админка /admin: что действует сейчас (и снять), список профилей, роли и личные ограничения.
 
 Вход — basic-auth родителя (ADMIN_USER + bcrypt ADMIN_PASSWORD_HASH), проверяет сам шлюз:
 так одинаково за Traefik и в режиме «дома». Пароль колонки сюда не подходит.
@@ -137,6 +137,25 @@ def merge(pid: str, body: MergeIn):
     profiles.store.delete(pid)
     log.info("профиль %s объединён с %s (%d образцов)", pid, body.into, samples)
     return _view(profiles.store.get(body.into))
+
+
+class RelaxIn(BaseModel):
+    who: list[str] | None = None      # None — снять для всех (и для неузнанного голоса)
+
+
+@router.get("/api/control")
+def control():
+    return policy.overview()
+
+
+@router.post("/api/control/relax")
+def relax(body: RelaxIn):
+    """Вернуть обычный режим (в т.ч. поверх расписания до конца окна) — когда голос родителя не узнан."""
+    if body.who and not all(profiles.store.get(pid) for pid in body.who):
+        raise HTTPException(400, "нет такого профиля")
+    removed = policy.relax(body.who or None)
+    log.info("ограничения сняты из админки: %s (команд снято: %d)", body.who or "все", removed)
+    return policy.overview()
 
 
 @router.delete("/api/profiles/{pid}")

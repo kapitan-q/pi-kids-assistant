@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Колонка — профили</title>
+<title>Колонка — админка</title>
 <style>
   :root {
     --bg: #f6f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
@@ -44,10 +44,22 @@
   .status { font-size: 13px; color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 32px 0; }
   .help { color: var(--muted); font-size: 13px; margin-top: 24px; }
+  h1 + .lead { margin-bottom: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+         padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .row:last-of-type { border-bottom: 0; }
+  .mode-on { color: var(--danger); font-weight: 600; }
+  #now .actions { margin-top: 10px; }
+  main > h1:not(:first-child) { margin-top: 28px; }
 </style>
 </head>
 <body>
 <main>
+  <h1>Сейчас</h1>
+  <p class="lead">Режимы, которые действуют прямо сейчас. Если колонка не узнала голос родителя —
+    ограничение можно снять здесь (до конца окна расписания или команды).</p>
+  <div id="now" class="card"><div class="status">Загружаю…</div></div>
+
   <h1>Профили колонки</h1>
   <p class="lead">Новый профиль появляется, когда человек скажет колонке «давай познакомимся».
     Здесь назначаются роль и ограничения.</p>
@@ -157,7 +169,39 @@ $("#list").addEventListener("click", async ev => {
   } catch (e) { status.textContent = "Ошибка: " + e.message; }
 });
 
+const SOURCE = {schedule: "по расписанию", override: "по команде", default: ""};
+
+function renderNow(c) {
+  const until = s => s ? " до " + new Date(s).toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"}) : "";
+  const rows = c.people.map(r => `<div class="row">
+      <div><b>${esc(r.name ?? "Голос не узнан")}</b> —
+        <span class="${r.restricted ? "mode-on" : ""}">${esc(r.title)}</span>${esc(until(r.until))}
+        <span class="status">${esc(SOURCE[r.source] ?? "")}</span></div>
+      ${r.restricted && r.id ? `<button data-who="${esc(r.id)}">Снять</button>` : ""}
+    </div>`).join("");
+  const any = c.people.some(r => r.restricted);
+  $("#now").innerHTML = rows + `<div class="actions">
+      ${any ? '<button class="primary" data-who="">Снять все ограничения</button>' : '<span class="status">Ограничений нет</span>'}
+      <span class="status" id="now-status"></span></div>`;
+}
+
+async function loadNow() {
+  try { renderNow(await api("GET", "/control")); }
+  catch (e) { $("#now").innerHTML = `<div class="status">Не загрузилось: ${esc(e.message)}</div>`; }
+}
+
+$("#now").addEventListener("click", async ev => {
+  const btn = ev.target.closest("button[data-who]");
+  if (!btn) return;
+  const who = btn.dataset.who;
+  if (!confirm(who ? "Вернуть обычный режим для этого профиля?" : "Вернуть обычный режим для всех?")) return;
+  try { renderNow(await api("POST", "/control/relax", {who: who ? [who] : null})); }
+  catch (e) { $("#now-status").textContent = "Ошибка: " + e.message; }
+});
+
 load();
+loadNow();
+setInterval(loadNow, 60000);
 </script>
 </body>
 </html>
