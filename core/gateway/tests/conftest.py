@@ -10,16 +10,6 @@ CONFIG = TMP / "speaker.yaml"
 CONFIG.write_text("""
 timezone: Europe/Belgrade
 unknown_speaker_matches: true
-roles:
-  parent: {title: Родитель, parent: true}
-  child: {title: Ребёнок, modules: [books]}
-  newcomer: {title: Новичок, modules: [books], unverified: true}
-  guest: {title: Гость, modules: [books], unverified: true}
-guest_role: guest
-import_profiles:
-  dad: {name: Папа, role: parent}
-  older: {name: Старший, role: child, age: 9, aliases: [старш]}
-  younger: {name: Младший, role: child, age: 7, aliases: [младш]}
 parent: {passphrase: "капитан немо"}
 modes:
   normal: {title: Обычный режим}
@@ -40,7 +30,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import policy  # noqa: E402
 import profiles  # noqa: E402
 
-profiles.store.migrate_from_yaml(policy.config()["import_profiles"])
+
+def _seed():
+    """Роли и люди как на titan: Дети (сказки), Папа — родитель, Старший и Младший — дети."""
+    profiles.roles.update(profiles.GUEST, allow_modules=["books"])
+    with profiles.roles.lock:
+        profiles.roles.items["child"] = profiles.Role(id="child", title="Дети", allow_modules=["books"])
+        profiles.roles._save()
+    with profiles.store.lock:
+        profiles.store._load()
+        for p in (profiles.Profile(id="dad", name="Папа", roles=["parent"], created_at=1),
+                  profiles.Profile(id="older", name="Старший", roles=["child"], age=9, aliases=["старш"], created_at=2),
+                  profiles.Profile(id="younger", name="Младший", roles=["child"], age=7, aliases=["младш"],
+                                   created_at=3)):
+            profiles.store.items[p.id] = p
+        profiles.store._save()
+
+
+_seed()
 
 
 @pytest.fixture(autouse=True)

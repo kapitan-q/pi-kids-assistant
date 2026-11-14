@@ -94,7 +94,7 @@ async def lifespan(_app: FastAPI):
     global http
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
     http = httpx.AsyncClient(timeout=httpx.Timeout(AGENT_HTTP_TIMEOUT, connect=5.0))
-    profiles.store.migrate_from_yaml(policy.config().get("import_profiles") or {})
+    log.info("роли: %s", [r.id for r in profiles.roles.all()])
     log.info("модули: %s, профили: %s", list(modules.enabled()), [p.id for p in profiles.store.all()])
     if not admin.ADMIN_PASSWORD_HASH:
         log.warning("ADMIN_PASSWORD_HASH не задан — /admin не пустит никого")

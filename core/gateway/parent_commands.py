@@ -114,7 +114,7 @@ def parse_until(t: str, now: datetime) -> datetime | None:
 
 def parse_who(t: str, profiles: dict) -> list[str] | None:
     who = [pid for pid, p in profiles.items()
-           if p.get("role") != "parent" and any(a.lower() in t for a in p.get("aliases", []))]
+           if any(a.lower() in t for a in p.get("aliases", []))]
     return who or None
 
 

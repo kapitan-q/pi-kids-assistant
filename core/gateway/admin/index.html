@@ -7,12 +7,12 @@
 <style>
   :root {
     --bg: #f6f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
-    --accent: #2f6f5e; --accent-text: #ffffff; --danger: #b3412f; --chip: #eef3f1;
+    --accent: #2f6f5e; --accent-text: #ffffff; --danger: #b3412f; --chip: #eef3f1; --warn: #fbf1dc;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161513; --card: #211f1c; --text: #ece8e1; --muted: #a39d93; --line: #35322d;
-      --accent: #5fb39b; --accent-text: #10201b; --danger: #e07a66; --chip: #24302c;
+      --accent: #5fb39b; --accent-text: #10201b; --danger: #e07a66; --chip: #24302c; --warn: #3a3020;
     }
   }
   * { box-sizing: border-box; }
@@ -20,7 +20,8 @@
          font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
   h1 { font-size: 22px; margin: 0 0 4px; }
-  .lead { color: var(--muted); margin: 0 0 20px; }
+  main > h1:not(:first-child) { margin-top: 32px; }
+  .lead { color: var(--muted); margin: 0 0 12px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
           padding: 16px; margin-bottom: 14px; }
   .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
@@ -28,30 +29,31 @@
   .meta { color: var(--muted); font-size: 13px; }
   .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 9px;
           font-size: 12px; margin-left: 6px; }
+  .chip.warn { background: var(--warn); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin-top: 12px; }
   @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .wide { grid-column: 1 / -1; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
   input[type=text], input[type=number], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--bg); color: var(--text); font: inherit; }
-  .mods { display: flex; flex-wrap: wrap; gap: 6px 14px; }
-  .mods label { display: inline-flex; gap: 6px; align-items: center; color: var(--text); font-size: 14px; margin: 0; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .checks label { display: inline-flex; gap: 6px; align-items: center; color: var(--text); font-size: 14px; margin: 0; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+  .actions select { width: auto; }
   button { font: inherit; border-radius: 8px; padding: 7px 14px; cursor: pointer;
            border: 1px solid var(--line); background: var(--card); color: var(--text); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
   button.danger { color: var(--danger); }
   .status { font-size: 13px; color: var(--muted); }
-  .empty { color: var(--muted); text-align: center; padding: 32px 0; }
-  .help { color: var(--muted); font-size: 13px; margin-top: 24px; }
-  h1 + .lead { margin-bottom: 12px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+  .summary { font-size: 13px; color: var(--muted); margin-top: 10px; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
          padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .row:last-of-type { border-bottom: 0; }
   .mode-on { color: var(--danger); font-weight: 600; }
-  #now .actions { margin-top: 10px; }
-  main > h1:not(:first-child) { margin-top: 28px; }
-  .toggle { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+  .toggle, .add { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+  .add input { flex: 1; min-width: 180px; width: auto; }
   .switch { display: inline-flex; gap: 8px; align-items: center; color: var(--text); font-size: 15px;
             font-weight: 600; margin: 0; }
 </style>
@@ -63,21 +65,32 @@
     ограничение можно снять здесь (до конца окна расписания или команды).</p>
   <div id="now" class="card"><div class="status">Загружаю…</div></div>
 
-  <h1>Профили колонки</h1>
-  <p class="lead">Новый профиль появляется, когда человек скажет колонке «давай познакомимся».
-    Здесь назначаются роль и ограничения.</p>
+  <h1>Роли</h1>
+  <p class="lead">Роль — что можно. У человека может быть несколько ролей: разрешено то, что разрешает
+    хоть одна, кроме того, что запрещает любая. «Гость» — для неузнанного голоса и людей без ролей.</p>
+  <div id="roles"><div class="empty">Загружаю…</div></div>
+  <div class="card add">
+    <input type="text" id="new-role" maxlength="40" placeholder="Название новой роли, например «Дети»">
+    <button id="add-role">Добавить роль</button>
+    <span class="status" id="add-role-status"></span>
+  </div>
+
+  <h1>Люди</h1>
+  <p class="lead">Человек появляется здесь, когда скажет колонке «давай познакомимся» — сначала без ролей,
+    как гость. Отметьте ему роли.</p>
   <div class="card toggle">
     <label class="switch"><input type="checkbox" id="onboarding" disabled> Разрешить новые знакомства</label>
     <span class="status" id="onboarding-status">Узнанный голос может только перезаписать свой профиль.</span>
   </div>
   <div id="list"><div class="empty">Загружаю…</div></div>
-  <p class="help">Роли и режимы описаны в <code>config/speaker.yaml</code>. Личные ограничения только сужают роль.
-    «Объединить» переносит записанный голос в другой профиль (например, в «Старший»),
-    чтобы правила расписания для него продолжили работать.</p>
+  <p class="status">«Объединить» переносит записанный голос в другой профиль (например, в «Старший»),
+    чтобы правила расписания для него продолжили работать. Режимы и расписание — в <code>config/speaker.yaml</code>.</p>
 </main>
 <script>
 const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
 let data = null;
 
 function when(ts) {
@@ -93,35 +106,69 @@ async function api(method, path, body) {
   return r.json();
 }
 
-function card(p) {
-  const roleOpts = Object.entries(data.roles).map(([k, r]) =>
-    `<option value="${esc(k)}" ${k === p.role ? "selected" : ""}>${esc(r.title)}</option>`).join("");
-  const roleMods = data.roles[p.role]?.modules;
-  const own = p.modules !== null;
-  const mods = Object.entries(data.modules).map(([k, t]) => {
-    const allowedByRole = !roleMods || roleMods.includes(k);
-    const checked = own ? p.modules.includes(k) : allowedByRole;
-    return `<label><input type="checkbox" name="mod" value="${esc(k)}" ${checked ? "checked" : ""}
-            ${allowedByRole ? "" : "disabled"}> ${esc(t)}</label>`;
-  }).join("") || '<span class="status">модулей нет</span>';
+const roleTitle = id => data.roles.find(r => r.id === id)?.title || id;
+const modTitles = ids => ids.map(m => data.modules[m] || m).join(", ");
+
+function checks(name, selected) {
+  const items = Object.entries(data.modules);
+  if (!items.length) return '<span class="status">модулей нет</span>';
+  return `<div class="checks">${items.map(([k, t]) =>
+    `<label><input type="checkbox" name="${name}" value="${esc(k)}" ${selected.includes(k) ? "checked" : ""}> ${esc(t)}</label>`
+  ).join("")}</div>`;
+}
+
+function roleCard(r) {
+  const used = r.used_by.length ? `у ${r.used_by.length} чел.` : "ни у кого";
+  const body = r.parent
+    ? '<p class="summary">Родителю можно всё: любые модули и теги, команды без кодовой фразы.</p>'
+    : `<div class="grid">
+        <div><label>Разрешённые модули</label>${checks("allow", r.allow_modules)}</div>
+        <div><label>Запрещённые модули</label>${checks("deny", r.deny_modules)}</div>
+        <div class="wide"><label>Запрещённые теги (через запятую)</label>
+          <input type="text" name="deny_tags" value="${esc(r.deny_tags.join(", "))}" placeholder="страшные, возраст:12-16"></div>
+      </div>`;
+  return `<div class="card" data-role="${esc(r.id)}">
+    <div class="head">
+      <div class="name">${esc(r.title)}${r.builtin ? '<span class="chip">встроенная</span>' : ""}</div>
+      <div class="meta">${esc(used)} · id ${esc(r.id)}</div>
+    </div>
+    <div class="grid"><div class="wide"><label>Название</label>
+      <input type="text" name="title" value="${esc(r.title)}" maxlength="40"></div></div>
+    ${body}
+    <div class="actions">
+      <button class="primary" data-act="save-role">Сохранить</button>
+      ${r.builtin ? "" : '<button class="danger" data-act="delete-role">Удалить</button>'}
+      <span class="status"></span>
+    </div>
+  </div>`;
+}
+
+function profileCard(p) {
+  const roles = data.roles.filter(r => r.id !== "guest").map(r =>
+    `<label><input type="checkbox" name="role" value="${esc(r.id)}" ${p.roles.includes(r.id) ? "checked" : ""}> ${esc(r.title)}</label>`
+  ).join("");
+  const chips = p.unverified ? `<span class="chip warn">${esc(roleTitle("guest"))} — роли не назначены</span>`
+    : p.roles.map(r => `<span class="chip">${esc(roleTitle(r))}</span>`).join("");
+  const eff = p.is_parent ? "можно всё"
+    : `модули: ${esc(modTitles(p.effective.modules) || "никаких")}` +
+      (p.effective.deny_tags.length ? `; нельзя теги: ${esc(p.effective.deny_tags.join(", "))}` : "") +
+      (p.age ? `; возраст ${p.age} — не включу то, что для старших` : "");
   const others = data.profiles.filter(o => o.id !== p.id)
     .map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join("");
   const voice = p.voice.samples ? `голос: ${p.voice.samples} образц.` : "голос не записан";
   return `<div class="card" data-id="${esc(p.id)}">
     <div class="head">
-      <div class="name">${esc(p.name)}<span class="chip">${esc(data.roles[p.role]?.title || p.role)}</span></div>
+      <div class="name">${esc(p.name)}${chips}</div>
       <div class="meta">${esc(voice)} · ${esc(when(p.last_seen))} · id ${esc(p.id)}</div>
     </div>
     <div class="grid">
+      <div class="wide"><label>Роли</label><div class="checks">${roles}</div></div>
       <div><label>Имя</label><input type="text" name="name" value="${esc(p.name)}" maxlength="40"></div>
-      <div><label>Роль</label><select name="role">${roleOpts}</select></div>
       <div><label>Возраст</label><input type="number" name="age" min="1" max="120" value="${esc(p.age ?? "")}"></div>
-      <div><label>Как называют в командах (через запятую)</label>
+      <div class="wide"><label>Как называют в командах родителя (через запятую)</label>
         <input type="text" name="aliases" value="${esc(p.aliases.join(", "))}" placeholder="старш"></div>
-      <div><label>Модули ${own ? "(личное ограничение)" : "(как у роли)"}</label><div class="mods">${mods}</div></div>
-      <div><label>Запрещённые теги (через запятую)</label>
-        <input type="text" name="tags_deny" value="${esc(p.tags_deny.join(", "))}" placeholder="страшные"></div>
     </div>
+    <p class="summary">Итого: ${eff}</p>
     <div class="actions">
       <button class="primary" data-act="save">Сохранить</button>
       ${others ? `<select name="into" aria-label="Объединить с">${others}</select>
@@ -133,8 +180,8 @@ function card(p) {
 }
 
 function render() {
-  const list = $("#list");
-  list.innerHTML = data.profiles.length ? data.profiles.map(card).join("")
+  $("#roles").innerHTML = data.roles.map(roleCard).join("");
+  $("#list").innerHTML = data.profiles.length ? data.profiles.map(profileCard).join("")
     : '<div class="empty">Пока никого. Скажите колонке «давай познакомимся».</div>';
 }
 
@@ -143,26 +190,51 @@ async function load() {
   catch (e) { $("#list").innerHTML = `<div class="empty">Не загрузилось: ${esc(e.message)}</div>`; }
 }
 
+$("#roles").addEventListener("click", async ev => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const el = btn.closest(".card"), id = el.dataset.role, status = $(".status", el);
+  try {
+    if (btn.dataset.act === "save-role") {
+      const body = {title: $("[name=title]", el).value};
+      if ($("[name=deny_tags]", el)) {
+        body.allow_modules = $$("[name=allow]:checked", el).map(i => i.value);
+        body.deny_modules = $$("[name=deny]:checked", el).map(i => i.value);
+        body.deny_tags = split($("[name=deny_tags]", el).value);
+      }
+      await api("PATCH", "/roles/" + id, body);
+      await load();
+      loadNow();
+    } else if (btn.dataset.act === "delete-role") {
+      if (!confirm("Удалить роль? У людей она снимется.")) return;
+      await api("DELETE", "/roles/" + id);
+      await load();
+    }
+  } catch (e) { status.textContent = "Ошибка: " + e.message; }
+});
+
+$("#add-role").addEventListener("click", async () => {
+  const title = $("#new-role").value.trim();
+  if (!title) return;
+  try { await api("POST", "/roles", {title}); $("#new-role").value = ""; await load(); }
+  catch (e) { $("#add-role-status").textContent = "Ошибка: " + e.message; }
+});
+
 $("#list").addEventListener("click", async ev => {
   const btn = ev.target.closest("button[data-act]");
   if (!btn) return;
   const el = btn.closest(".card"), id = el.dataset.id, status = $(".status", el);
   const val = n => $(`[name=${n}]`, el).value;
-  const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
   try {
     if (btn.dataset.act === "save") {
-      const roleMods = data.roles[val("role")]?.modules;
-      const checked = [...el.querySelectorAll("[name=mod]:checked")].map(i => i.value);
-      const allByRole = Object.keys(data.modules).filter(k => !roleMods || roleMods.includes(k));
-      const same = allByRole.length === checked.length && allByRole.every(k => checked.includes(k));
       const age = val("age");
       await api("PATCH", "/profiles/" + id, {
-        name: val("name"), role: val("role"), aliases: split(val("aliases")), tags_deny: split(val("tags_deny")),
+        name: val("name"), aliases: split(val("aliases")),
+        roles: $$("[name=role]:checked", el).map(i => i.value),
         ...(age ? {age: Number(age)} : {clear_age: true}),
-        ...(same ? {inherit_modules: true} : {modules: checked}),
       });
-      status.textContent = "Сохранено";
       await load();
+      loadNow();
     } else if (btn.dataset.act === "merge") {
       const into = val("into"), target = data.profiles.find(p => p.id === into);
       if (!confirm(`Перенести голос в профиль «${target.name}» и удалить этот профиль?`)) return;

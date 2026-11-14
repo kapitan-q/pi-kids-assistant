@@ -1,4 +1,4 @@
-"""Мини-админка /admin: что действует сейчас (и снять), список профилей, роли и личные ограничения.
+"""Мини-админка /admin: что действует сейчас (и снять), роли (что можно) и люди (какие у них роли).
 
 Вход — basic-auth родителя (ADMIN_USER + bcrypt ADMIN_PASSWORD_HASH), проверяет сам шлюз:
 так одинаково за Traefik и в режиме «дома». Пароль колонки сюда не подходит.
@@ -62,24 +62,55 @@ router = APIRouter(prefix="/admin", dependencies=[Depends(check_parent)])
 
 class ProfilePatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=40)
-    role: str | None = None
+    roles: list[str] | None = None
     age: int | None = Field(default=None, ge=1, le=120)
     clear_age: bool = False
     aliases: list[str] | None = None
-    modules: list[str] | None = None
-    inherit_modules: bool = False     # true — снять личное ограничение модулей (как у роли)
-    tags_deny: list[str] | None = None
 
 
 class MergeIn(BaseModel):
     into: str
 
 
+class RoleIn(BaseModel):
+    title: str = Field(min_length=1, max_length=40)
+
+
+class RolePatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=40)
+    allow_modules: list[str] | None = None
+    deny_modules: list[str] | None = None
+    deny_tags: list[str] | None = None
+
+
 def _view(p: profiles.Profile) -> dict:
     d = p.model_dump()
-    d["is_parent"] = bool(policy.role_conf(p.role).get("parent"))
-    d["effective_modules"] = policy.access(p.id)["modules"]
+    acc = policy.access(p.id)
+    d["is_parent"] = policy.is_parent(p.id)
+    d["unverified"] = policy.unverified(p.id)
+    d["effective"] = {"modules": acc["modules"], "deny_tags": sorted(acc["tags_deny"])}
     return d
+
+
+def _role_view(r: profiles.Role) -> dict:
+    d = r.model_dump()
+    d["builtin"] = r.id in profiles.BUILTIN
+    d["used_by"] = [p.id for p in profiles.store.all() if r.id in p.roles]
+    return d
+
+
+def _clean(items: list[str], lower: bool = False) -> list[str]:
+    out = []
+    for x in items:
+        x = x.strip().lower() if lower else x.strip()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def _schedule_refs(role_id: str) -> bool:
+    cfg = policy.config()
+    return any(role_id in (rule.get("who") or []) for rule in cfg.get("schedule") or [])
 
 
 @router.get("")
@@ -90,13 +121,10 @@ def page():
 
 @router.get("/api/profiles")
 def list_profiles():
-    roles = policy.config().get("roles") or {}
     return {
         "profiles": [_view(p) for p in profiles.store.all()],
-        "roles": {name: {"title": r.get("title", name), "modules": r.get("modules"),
-                         "parent": bool(r.get("parent"))} for name, r in roles.items()},
+        "roles": [_role_view(r) for r in profiles.roles.all()],
         "modules": modules.titles(),
-        "guest_role": policy.guest_role(),
     }
 
 
@@ -104,25 +132,63 @@ def list_profiles():
 def patch_profile(pid: str, body: ProfilePatch):
     if not profiles.store.get(pid):
         raise HTTPException(404)
-    roles = policy.config().get("roles") or {}
-    fields = body.model_dump(exclude_none=True, exclude={"clear_age", "inherit_modules"})
-    if "role" in fields and fields["role"] not in roles:
-        raise HTTPException(400, f"нет роли {fields['role']}")
-    if "modules" in fields:
-        unknown = set(fields["modules"]) - set(modules.enabled())
+    fields = body.model_dump(exclude_none=True, exclude={"clear_age"})
+    if "roles" in fields:
+        fields["roles"] = [r for r in _clean(fields["roles"]) if r != profiles.GUEST]
+        unknown = [r for r in fields["roles"] if not profiles.roles.get(r)]
         if unknown:
-            raise HTTPException(400, f"нет модулей {sorted(unknown)}")
+            raise HTTPException(400, f"нет ролей {unknown}")
     if body.clear_age:
         fields["age"] = None
-    if body.inherit_modules:
-        fields["modules"] = None
     if "aliases" in fields:
-        fields["aliases"] = [a.strip().lower() for a in fields["aliases"] if a.strip()]
-    if "tags_deny" in fields:
-        fields["tags_deny"] = [t.strip() for t in fields["tags_deny"] if t.strip()]
+        fields["aliases"] = _clean(fields["aliases"], lower=True)
     p = profiles.store.update(pid, **fields)
     log.info("профиль %s изменён: %s", pid, fields)
     return _view(p)
+
+
+@router.post("/api/roles")
+def create_role(body: RoleIn):
+    r = profiles.roles.create(body.title)
+    log.info("роль %s создана", r.id)
+    return _role_view(r)
+
+
+@router.patch("/api/roles/{rid}")
+def patch_role(rid: str, body: RolePatch):
+    r = profiles.roles.get(rid)
+    if not r:
+        raise HTTPException(404)
+    fields = body.model_dump(exclude_none=True)
+    if r.parent and set(fields) - {"title"}:
+        raise HTTPException(400, "родителю можно всё — у этой роли меняется только название")
+    for key in ("allow_modules", "deny_modules"):
+        if key in fields:
+            fields[key] = _clean(fields[key])
+            unknown = set(fields[key]) - set(modules.enabled())
+            if unknown:
+                raise HTTPException(400, f"нет модулей {sorted(unknown)}")
+    if "deny_tags" in fields:
+        fields["deny_tags"] = _clean(fields["deny_tags"])
+    r = profiles.roles.update(rid, **fields)
+    log.info("роль %s изменена: %s", rid, fields)
+    return _role_view(r)
+
+
+@router.delete("/api/roles/{rid}")
+def delete_role(rid: str):
+    if rid in profiles.BUILTIN:
+        raise HTTPException(400, "встроенную роль удалить нельзя")
+    if not profiles.roles.get(rid):
+        raise HTTPException(404)
+    if _schedule_refs(rid):
+        raise HTTPException(409, "роль используется в расписании (config/speaker.yaml) — сначала уберите её оттуда")
+    for p in profiles.store.all():
+        if rid in p.roles:
+            profiles.store.update(p.id, roles=[x for x in p.roles if x != rid])
+    profiles.roles.delete(rid)
+    log.info("роль %s удалена", rid)
+    return {"ok": True}
 
 
 @router.post("/api/profiles/{pid}/merge")

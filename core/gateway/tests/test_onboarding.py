@@ -4,6 +4,7 @@ import random
 import pytest
 
 import onboarding as ob
+import policy
 import profiles
 import voices
 
@@ -52,7 +53,7 @@ def test_parsers():
     assert ob.parse_age("не знаю") == "retry"
 
 
-def test_full_enrollment_creates_newcomer_profile():
+def test_full_enrollment_creates_profile_without_roles():
     masha = voice(1)
     r = ob.start("d1", masha("давай познакомимся"), None)
     assert r["expect_reply"] and "зовут" in r["reply"]
@@ -60,7 +61,7 @@ def test_full_enrollment_creates_newcomer_profile():
     assert "Маша, правильно" in replies[0]["reply"]
     assert replies[-1]["expect_reply"] is False and "Маша" in replies[-1]["reply"]
     p = profiles.store.by_name("Маша")
-    assert p and p.role == "newcomer" and p.age == 6 and p.voice.samples >= 4
+    assert p and p.roles == [] and policy.unverified(p.id) and p.age == 6 and p.voice.samples >= 4
     pid, score = voices.store.identify(masha("проверка").vector)
     assert pid == p.id and score > 0.8
     other_pid, other_score = voices.store.identify(voice(99)("чужой").vector)
@@ -108,13 +109,13 @@ def test_name_correction():
 
 def test_known_voice_adds_samples_to_own_profile_only():
     kid = voice(7)
-    p = profiles.store.create("Ваня", "child", 8)
+    p = profiles.store.create("Ваня", ["child"], 8)
     r = ob.start("d7", kid("давай познакомимся"), p.id)
     assert "Ваня" in r["reply"]
     replies = run("d7", kid, ["да", *phrases()])
     assert "лучше" in replies[-1]["reply"]
     assert profiles.store.get(p.id).voice.samples == len(phrases())
-    assert profiles.store.get(p.id).role == "child"         # роль не тронута
+    assert profiles.store.get(p.id).roles == ["child"]      # роли не тронуты
     profiles.store.delete(p.id)
     voices.store.delete(p.id)
 
@@ -127,7 +128,7 @@ def test_voice_only_and_profile_limit(monkeypatch):
 
 def test_known_voice_cannot_become_someone_else():
     petya = voice(10)
-    p = profiles.store.create("Петя", "child", 7)
+    p = profiles.store.create("Петя", ["child"], 7)
     r = ob.start("d9", petya("давай познакомимся"), p.id)
     assert "Петя" in r["reply"]
     r = ob.step("d9", petya("нет я вася"))
@@ -139,7 +140,7 @@ def test_known_voice_cannot_become_someone_else():
 def test_recognized_at_finish_is_refused():
     """На старте голос не узнан (одна фраза), но по всем образцам — это Петя: второй профиль не заводим."""
     petya = voice(11)
-    p = profiles.store.create("Петя", "child", 7)
+    p = profiles.store.create("Петя", ["child"], 7)
     voices.store.save(p.id, [b"RIFF"] * 4, [petya("x").vector for _ in range(4)], MODEL)
     ob.start("d10", petya("давай познакомимся"), None)
     replies = run("d10", petya, ["Вася", "да", "семь", *phrases()])
@@ -155,7 +156,7 @@ def test_onboarding_can_be_closed():
         r = ob.start("d11", voice(12)("давай познакомимся"), None)
         assert not r["expect_reply"] and "родител" in r["reply"]
         kid = voice(13)                                          # узнанный может перезаписать свой голос
-        p = profiles.store.create("Таня", "child", 8)
+        p = profiles.store.create("Таня", ["child"], 8)
         assert ob.start("d12", kid("давай познакомимся"), p.id)["expect_reply"]
         profiles.store.delete(p.id)
     finally:

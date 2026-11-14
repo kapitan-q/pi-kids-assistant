@@ -1,8 +1,9 @@
-"""Профили людей у колонки: data/core/profiles.json.
+"""Люди и роли: data/core/profiles.json и data/core/roles.json, правятся в /admin.
 
-Создаются знакомством голосом («давай познакомимся»), роль и ограничения назначает родитель в /admin.
-Роли (что можно по умолчанию) — в config/speaker.yaml. При первом запуске профили переносятся
-из старого раздела profiles в yaml (без голоса).
+Профиль создаётся знакомством голосом («давай познакомимся») без ролей — как гость.
+Роль — набор разрешений: какие модули можно, какие модули и теги нельзя. У человека может быть
+несколько ролей: разрешено то, что разрешает хоть одна, минус всё, что запрещает любая.
+Встроенные роли: guest (голос не узнан или ролей нет) и parent (всё можно, команды родителя).
 """
 import json
 import logging
@@ -12,12 +13,19 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 log = logging.getLogger("profiles")
 DATA_DIR = Path(os.getenv("CORE_DATA_DIR", "/data/core"))
-PATH = DATA_DIR / "profiles.json"
+GUEST, PARENT = "guest", "parent"
+BUILTIN = (GUEST, PARENT)
+LEGACY_ROLES = {"newcomer", GUEST}        # старая роль «новичок» = без ролей
+
+
+def slug(text: str) -> str:
+    return re.sub(r"[^\w-]", "", text.strip().lower().replace(" ", "-"))[:20] or "x"
 
 
 class Voice(BaseModel):
@@ -28,21 +36,47 @@ class Voice(BaseModel):
 class Profile(BaseModel):
     id: str = Field(pattern=r"^[\w-]{1,32}$")
     name: str = Field(min_length=1, max_length=40)
-    role: str = Field(pattern=r"^[\w-]{1,32}$")
+    roles: list[str] = Field(default_factory=list)            # пусто — гость
     age: int | None = Field(default=None, ge=1, le=120)
     aliases: list[str] = Field(default_factory=list)          # как называют в командах: «старш»
-    modules: list[str] | None = None                          # личное сужение роли (None — как у роли)
-    tags_deny: list[str] = Field(default_factory=list)        # личные запреты тегов
     voice: Voice = Field(default_factory=Voice)
     created_at: float = Field(default_factory=time.time)
     last_seen: float | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy(cls, data):
+        """Старый формат: одна роль + личные ограничения (теперь ограничения — только в ролях)."""
+        if isinstance(data, dict) and "role" in data:
+            data = dict(data)
+            role = data.pop("role")
+            data.setdefault("roles", [] if role in LEGACY_ROLES else [role])
+            if data.pop("modules", None) is not None or data.pop("tags_deny", None):
+                log.warning("профиль %s: личные ограничения больше не поддерживаются — задайте их ролью",
+                            data.get("id"))
+        return data
 
-class Store:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.items: dict[str, Profile] = {}
+
+class Role(BaseModel):
+    id: str = Field(pattern=r"^[\w-]{1,32}$")
+    title: str = Field(min_length=1, max_length=40)
+    parent: bool = False                                       # всё можно + команды родителя
+    allow_modules: list[str] = Field(default_factory=list)
+    deny_modules: list[str] = Field(default_factory=list)
+    deny_tags: list[str] = Field(default_factory=list)
+    created_at: float = Field(default_factory=time.time)
+
+
+M = TypeVar("M", bound=BaseModel)
+
+
+class JsonStore(Generic[M]):
+    """Список моделей в JSON-файле: атомарная запись, потокобезопасно."""
+
+    def __init__(self, path: Path, model: type[M], key: str) -> None:
+        self.path, self.model, self.key = path, model, key
+        self.lock = threading.RLock()
+        self.items: dict[str, M] = {}
         self.loaded = False
 
     def _load(self) -> None:
@@ -50,75 +84,74 @@ class Store:
             return
         try:
             raw = json.loads(self.path.read_text("utf-8"))
-            self.items = {p["id"]: Profile.model_validate(p) for p in raw.get("profiles", [])}
+            self.items = {x["id"]: self.model.model_validate(x) for x in raw.get(self.key, [])}
         except FileNotFoundError:
             self.items = {}
         except (ValueError, KeyError):
-            log.exception("profiles.json повреждён — работаю без профилей (файл не трогаю)")
+            log.exception("%s повреждён — работаю без него (файл не трогаю)", self.path.name)
             self.items = {}
         self.loaded = True
+        self._loaded()
+
+    def _loaded(self) -> None:
+        """Хук после загрузки (значения по умолчанию)."""
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        data = {"profiles": [p.model_dump() for p in self.items.values()]}
+        data = {self.key: [x.model_dump() for x in self.items.values()]}
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
         tmp.replace(self.path)
 
-    def migrate_from_yaml(self, profiles: dict) -> None:
-        """Однократно: профили из старого policies.yaml → profiles.json."""
+    def _new_id(self, text: str) -> str:
+        s = slug(text)
+        return s if s not in self.items else f"{s}-{uuid.uuid4().hex[:4]}"
+
+    def all(self) -> list[M]:
         with self.lock:
             self._load()
-            if self.path.exists() or not profiles:
-                return
-            for pid, p in profiles.items():
-                self.items[pid] = Profile(id=pid, name=p.get("name", pid), role=p.get("role", "child"),
-                                          age=p.get("age"), aliases=p.get("aliases") or [])
-            self._save()
-            log.info("профили перенесены из yaml: %s", list(self.items))
+            return sorted(self.items.values(), key=lambda x: x.created_at)
 
-    def all(self) -> list[Profile]:
-        with self.lock:
-            self._load()
-            return sorted(self.items.values(), key=lambda p: p.created_at)
-
-    def get(self, pid: str | None) -> Profile | None:
-        if not pid:
+    def get(self, xid: str | None) -> M | None:
+        if not xid:
             return None
         with self.lock:
             self._load()
-            return self.items.get(pid)
+            return self.items.get(xid)
 
+    def update(self, xid: str, **fields) -> M:
+        with self.lock:
+            self._load()
+            x = self.model.model_validate({**self.items[xid].model_dump(), **fields, "id": xid})
+            self.items[xid] = x
+            self._save()
+            return x
+
+    def delete(self, xid: str) -> bool:
+        with self.lock:
+            self._load()
+            if self.items.pop(xid, None) is None:
+                return False
+            self._save()
+            return True
+
+    def reload(self) -> None:
+        with self.lock:
+            self.loaded = False
+
+
+class ProfileStore(JsonStore[Profile]):
     def by_name(self, name: str) -> Profile | None:
         n = name.strip().lower()
         return next((p for p in self.all() if p.name.lower() == n), None)
 
-    def create(self, name: str, role: str, age: int | None = None) -> Profile:
-        slug = re.sub(r"[^\w-]", "", name.lower().replace(" ", "-"))[:20] or "p"
+    def create(self, name: str, roles: list[str] | None = None, age: int | None = None) -> Profile:
         with self.lock:
             self._load()
-            pid = slug if slug not in self.items else f"{slug}-{uuid.uuid4().hex[:4]}"
-            p = Profile(id=pid, name=name.strip(), role=role, age=age)
-            self.items[pid] = p
+            p = Profile(id=self._new_id(name), name=name.strip(), roles=roles or [], age=age)
+            self.items[p.id] = p
             self._save()
             return p
-
-    def update(self, pid: str, **fields) -> Profile:
-        with self.lock:
-            self._load()
-            p = self.items[pid]
-            p = Profile.model_validate({**p.model_dump(), **fields, "id": pid})
-            self.items[pid] = p
-            self._save()
-            return p
-
-    def delete(self, pid: str) -> bool:
-        with self.lock:
-            self._load()
-            if self.items.pop(pid, None) is None:
-                return False
-            self._save()
-            return True
 
     def touch(self, pid: str) -> None:
         """Отметить, что человека только что узнали (без записи на диск чаще раза в минуту)."""
@@ -129,9 +162,44 @@ class Store:
                 p.last_seen = time.time()
                 self._save()
 
-    def reload(self) -> None:
+
+class RoleStore(JsonStore[Role]):
+    def _loaded(self) -> None:
+        """Встроенные роли есть всегда; роли, на которые ссылаются профили, но которых нет, — создаются
+        (переход со старых ролей из yaml: можно переименовать и настроить в админке)."""
+        changed = False
+        if GUEST not in self.items:
+            self.items[GUEST] = Role(id=GUEST, title="Гость", allow_modules=default_modules(), created_at=0)
+            changed = True
+        if PARENT not in self.items:
+            self.items[PARENT] = Role(id=PARENT, title="Родитель", parent=True, created_at=1)
+            changed = True
+        for p in profiles_store.all():
+            for r in p.roles:
+                if r not in self.items:
+                    self.items[r] = Role(id=r, title=r, allow_modules=default_modules())
+                    log.info("роль %s создана для профиля %s — настройте в /admin", r, p.id)
+                    changed = True
+        if changed:
+            self._save()
+
+    def create(self, title: str) -> Role:
         with self.lock:
-            self.loaded = False
+            self._load()
+            r = Role(id=self._new_id(title), title=title.strip())
+            self.items[r.id] = r
+            self._save()
+            return r
 
 
-store = Store(PATH)
+def default_modules() -> list[str]:
+    """Модули для новой встроенной роли: все включённые (меняется в админке)."""
+    try:
+        import modules
+        return list(modules.enabled())
+    except Exception:  # noqa: BLE001 — без modules.yaml (тесты, первый запуск)
+        return []
+
+
+store = profiles_store = ProfileStore(DATA_DIR / "profiles.json", Profile, "profiles")
+roles = RoleStore(DATA_DIR / "roles.json", Role, "roles")

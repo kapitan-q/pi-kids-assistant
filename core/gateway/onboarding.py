@@ -1,7 +1,7 @@
 """Знакомство голосом: «давай познакомимся» → имя → возраст → несколько фраз → новый профиль.
 
 Конечный автомат на устройство, без Claude. Каждая реплика (с достаточной речью и похожая на
-предыдущие) — образец голоса. Новый профиль получает роль newcomer_role; роль выше назначает
+предыдущие) — образец голоса. Новый профиль создаётся без ролей (как гость); роли назначает
 только родитель в /admin. Голос к существующему профилю здесь не привязывается — иначе ребёнок
 мог бы назваться «Папой»; для этого в админке есть «объединить». Исключение — человек уже узнан
 по голосу: тогда можно дописать образцы к его же профилю, но не завести второй под другим именем
@@ -246,7 +246,7 @@ def finish(device_id: str, s: Session) -> dict:
         return _end(device_id, "known_other", name=profiles.store.get(dup).name)
     if not policy.onboarding_enabled():
         return _end(device_id, "closed")
-    p = profiles.store.create(s.name, policy.config().get("newcomer_role", "newcomer"), s.age)
+    p = profiles.store.create(s.name, [], s.age)          # без ролей = гость, роли назначает родитель
     n = voices.store.save(p.id, s.samples, s.vectors, s.model)
     profiles.store.update(p.id, voice={"samples": n, "updated_at": time.time()}, last_seen=time.time())
     log.info("знакомство на %s: новый профиль %s (%s, %s лет, %d образцов)", device_id, p.id, s.name, s.age, n)

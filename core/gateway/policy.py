@@ -69,40 +69,39 @@ def profile(speaker: str | None) -> dict:
     return p.model_dump() if p else {}
 
 
-def guest_role() -> str:
-    return config().get("guest_role", "guest")
+def role_ids(speaker: str | None) -> list[str]:
+    """Роли говорящего (существующие); нет ролей или голос не узнан — гость."""
+    p = profiles.store.get(speaker)
+    ids = [r for r in (p.roles if p else []) if r != profiles.GUEST and profiles.roles.get(r)]
+    return ids or [profiles.GUEST]
 
 
-def role_of(speaker: str | None) -> str:
-    return profile(speaker).get("role") or guest_role()
-
-
-def role_conf(role: str) -> dict:
-    return (config().get("roles") or {}).get(role, {})
+def role_list(speaker: str | None) -> list[profiles.Role]:
+    return [profiles.roles.get(r) for r in role_ids(speaker)]
 
 
 def is_parent(speaker: str | None) -> bool:
-    return bool(speaker) and bool(role_conf(role_of(speaker)).get("parent"))
+    return bool(speaker) and any(r.parent for r in role_list(speaker))
 
 
 def children() -> list[str]:
     """id профилей, на которых действуют детские правила (все, кроме родителей)."""
-    return [p.id for p in profiles.store.all() if not role_conf(p.role).get("parent")]
+    return [p.id for p in profiles.store.all() if not is_parent(p.id)]
 
 
 def unverified(speaker: str | None) -> bool:
-    """Личность не подтверждена родителем: голос не узнан или роль помечена unverified
-    (новичок после знакомства — ребёнок мог представиться чужим именем)."""
-    return speaker is None or bool(role_conf(role_of(speaker)).get("unverified"))
+    """Личность не подтверждена родителем: голос не узнан или у профиля нет ролей
+    (только что познакомился — ребёнок мог представиться чужим именем)."""
+    return role_ids(speaker) == [profiles.GUEST]
 
 
 def speaker_matches(who: list | None, speaker: str | None, mode: str | None = None) -> bool:
-    """who в правилах и командах — id профилей и/или имена ролей (who: [child]).
+    """who в правилах и командах — id профилей и/или ролей (who: [deti]).
     Неподтверждённого говорящего (unknown_speaker_matches) касаются все ограничения с who —
     но не послабления: «обычный режим для старшего» на новичка не распространяется."""
     if not who:
         return True
-    if speaker is not None and (speaker in who or role_of(speaker) in who):
+    if (speaker is not None and speaker in who) or set(role_ids(speaker)) & set(who):
         return True
     if not unverified(speaker) or mode == config().get("default_mode", "normal"):
         return False
@@ -110,15 +109,19 @@ def speaker_matches(who: list | None, speaker: str | None, mode: str | None = No
 
 
 def access(speaker: str | None) -> dict:
-    """Что можно этому говорящему: роль (yaml) сужается личными ограничениями (админка).
+    """Что можно говорящему по его ролям: модули, которые разрешает хоть одна роль, минус те,
+    что запрещает любая; запрещённые теги — от всех ролей. Родитель — всё.
     {"modules": [..] | None (любые), "tags_deny": set, "age": int | None}"""
-    p = profile(speaker)
-    role = role_conf(role_of(speaker))
-    mods = role.get("modules")
-    if p.get("modules") is not None:
-        mods = [m for m in p["modules"] if mods is None or m in mods]
-    deny = {t.lower() for t in (role.get("tags_deny") or []) + (p.get("tags_deny") or [])}
-    return {"modules": mods, "tags_deny": deny, "age": p.get("age")}
+    age = profile(speaker).get("age")
+    rs = role_list(speaker)
+    if any(r.parent for r in rs):
+        return {"modules": None, "tags_deny": set(), "age": age}
+    deny_mods = {m for r in rs for m in r.deny_modules}
+    allowed = []
+    for r in rs:
+        allowed += [m for m in r.allow_modules if m not in deny_mods and m not in allowed]
+    deny = {t.lower() for r in rs for t in r.deny_tags}
+    return {"modules": allowed, "tags_deny": deny, "age": age}
 
 
 # ---------- состояние ----------
