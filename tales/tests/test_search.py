@@ -59,7 +59,8 @@ def test_substring_ranks_below_word_start(c):
 
 
 def test_filters(c):
-    assert "kuma" not in ids(c.search("лиса", age=4))
+    assert "kuma" not in ids(c.search("лиса", age=4))      # рано: от 6 лет
+    assert "kuma" in ids(c.search("лиса", age=12))         # «вырос» — всё равно находим
     assert "serdce" not in ids(c.search("ведьма", max_minutes=30))
 
 

@@ -244,7 +244,9 @@ class Catalog:
         self.ensure_fresh()
         out = []
         for t in self.tales.values():
-            if age is not None and ((t["age_min"] or 0) > age or (t["age_max"] or 99) < age):
+            # возраст фильтрует только снизу («рано»: «Премудрый пискарь» пятилетке).
+            # Верхняя граница — «может быть скучно», а не запрет: восьмилетний просит «Мойдодыра» — включаем.
+            if age is not None and (t["age_min"] or 0) > age:
                 continue
             if max_minutes is not None and t["duration_sec"] and t["duration_sec"] > max_minutes * 60:
                 continue
