@@ -34,6 +34,8 @@ MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-5-5")
 TALES_MCP_URL = os.getenv("TALES_MCP_URL", "http://tales:8000/mcp")
 IDLE_SEC = int(os.getenv("SESSION_IDLE_SEC", "600"))
 TURN_TIMEOUT = float(os.getenv("AGENT_TURN_TIMEOUT", "30"))
+# Глубина «обдумывания» Claude: low — быстрее (детской болтовне хватает), medium — по умолчанию у Haiku 5.5
+EFFORT = os.getenv("AGENT_EFFORT", "low").strip() or None
 ALLOWED_DEVICES = {d.strip() for d in os.getenv("ALLOWED_DEVICES", "").split(",") if d.strip()}
 LOG_DIR = Path(os.getenv("LOG_DIR", "/data/logs"))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
@@ -84,6 +86,8 @@ def make_options() -> ClaudeAgentOptions:
         max_turns=6,
         cwd="/app/workdir",
     )
+    if EFFORT and "effort" in _OPTION_FIELDS:
+        opts["effort"] = EFFORT
     if "tools" in _OPTION_FIELDS:
         opts["tools"] = []           # пустой базовый набор встроенных инструментов
     if "permission_mode" in _OPTION_FIELDS:

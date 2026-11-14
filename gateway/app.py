@@ -56,6 +56,7 @@ from pydantic import BaseModel
 
 import parent_commands
 import policy
+import quick_commands
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gateway")
@@ -69,6 +70,7 @@ GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN", "")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 AGENT_HTTP_TIMEOUT = float(os.getenv("AGENT_HTTP_TIMEOUT", "40"))
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", "5000000"))
+QUICK_COMMANDS = os.getenv("QUICK_COMMANDS", "1") not in ("0", "false", "no")
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "/library"))
 SPEECH_DIR = Path("/tmp/speech")
 SPEECH_TTL_SEC = 600
@@ -240,7 +242,13 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         reply = res.conf.get("message", "") if policy.announce_once(res) else ""
         return await _answer(text, reply, {"type": "stop"}, lim, blocked=True)
 
-    # 3. Агент
+    # 3. Простые команды плееру («стоп», «потише», «продолжай») — сразу, без Claude
+    if QUICK_COMMANDS and (quick := quick_commands.parse(text)) is not None:
+        action, reply, lim = await enforce(quick["action"], "", res, lim, now_playing, verified_parent)
+        log.info("quick %s: %r -> %s", device_id, text, action)
+        return await _answer(text, reply, action, lim, quick=True)
+
+    # 4. Агент
     try:
         r = await http.post(f"{AGENT_URL}/chat", json={
             "device_id": device_id, "text": text,
@@ -253,9 +261,14 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         return await _answer(text, FALLBACK_REPLY, None, lim, error="agent")
     reply = data.get("reply", "")
     action = await resolve_action(data.get("action"))
+    action, reply, lim = await enforce(action, reply, res, lim, now_playing, verified_parent)
+    return await _answer(text, reply, action, lim)
 
-    # 4. Страховка: правила режима важнее того, что решил агент —
-    #    и для новой сказки, и для «продолжай»/перемотки уже играющей.
+
+async def enforce(action: dict | None, reply: str, res, lim: dict, now_playing: str | None,
+                  verified_parent: bool) -> tuple[dict | None, str, dict]:
+    """Страховка: правила режима важнее того, что решил агент (или быстрая команда) —
+    и для новой сказки, и для «продолжай»/перемотки уже играющей."""
     if action and action["type"] in ("play", "resume", "seek") and not verified_parent:
         if action["type"] == "play":
             tags = action["tags"]
@@ -270,8 +283,7 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
             lim = policy.limits(res)  # пересчитать stop_after_sec
     if action and action["type"] == "volume" and action.get("level"):
         action["level"] = min(action["level"], lim["max_volume"])
-
-    return await _answer(text, reply, action, lim)
+    return action, reply, lim
 
 
 # ---------- API для Pi ----------

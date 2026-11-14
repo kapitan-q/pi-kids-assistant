@@ -108,6 +108,15 @@ check("вопрос «почему небо голубое» → ответ бе
 d = say("включи любую сказку")
 check("«любую сказку» → play", kind(d) == "play", d)
 
+# ---------------------------------------------------------------- быстрые команды
+section("Быстрые команды (без Claude)")
+for phrase, want in [("стоп", "stop"), ("продолжай", "resume"), ("сделай потише", "volume"),
+                     ("громкость семьдесят", "volume"), ("перемотай назад", "seek")]:
+    d = say(phrase, kolobok_id)
+    check(f"«{phrase}» → {want} мгновенно", d.get("quick") and kind(d) == want and d["_ms"] < 1500, d)
+d = say("стоп а почему колобок убежал")
+check("сложная фраза уходит к Claude", not d.get("quick") and d.get("reply"), d)
+
 # ---------------------------------------------------------------- ночь
 section("Ночной режим (команда админки)")
 call("POST", "/admin/override", {"mode": "night", "minutes": 10}, admin=True)

@@ -71,8 +71,10 @@ SOUNDS = {
     "wake": CACHE_DIR / "wake.wav",
     "done": CACHE_DIR / "done.wav",
     "error": CACHE_DIR / "error.wav",
+    "listen": CACHE_DIR / "listen.wav",
 }
 make_tone(SOUNDS["wake"], [(880, 0.12)])
+make_tone(SOUNDS["listen"], [(990, 0.06)], volume=0.12)   # тихий «слушаю дальше»
 make_tone(SOUNDS["done"], [(660, 0.08)])
 make_tone(SOUNDS["error"], [(330, 0.15), (220, 0.25)])
 
@@ -269,10 +271,11 @@ class Client:
         while not self.audio.empty():
             self.audio.get_nowait()
 
-    def record_utterance(self) -> np.ndarray | None:
+    def record_utterance(self, no_speech: float | None = None) -> np.ndarray | None:
         a = CFG["audio"]
         end_silence = int(a.get("end_silence_ms", 900))
-        no_speech = float(a.get("no_speech_timeout_sec", 4))
+        if no_speech is None:
+            no_speech = float(a.get("no_speech_timeout_sec", 4))
         max_sec = float(a.get("max_record_sec", 10))
         frames, started, silence_ms, t0 = [], False, 0, time.monotonic()
         while True:
@@ -340,40 +343,75 @@ class Client:
 
     # --- один диалог
 
-    def on_wake(self) -> None:
+    def _exchange(self, samples: np.ndarray, was_playing: bool) -> dict | None:
+        """Отправить фразу, проиграть ответ, выполнить команду. None — сервер не ответил по делу."""
+        play_file(SOUNDS["done"])
+        try:
+            resp = self.ask(samples)
+        except Exception as e:  # noqa: BLE001
+            log.error("сервер недоступен: %s", e)
+            play_file(SOUNDS["error"])
+            return None
+        log.info("услышал: %r -> %r (%s)", resp.get("heard"), resp.get("reply"), resp.get("timing_ms"))
+        if not resp.get("heard"):  # ложное срабатывание
+            return None
+        self.apply_limits(resp.get("limits"))
+        if resp.get("speech_url"):
+            try:
+                play_url(resp["speech_url"])
+            except Exception as e:  # noqa: BLE001
+                log.error("не удалось проиграть ответ: %s", e)
+        self.apply_action(resp.get("action"), resp.get("limits"), was_playing)
+        return resp
+
+    def on_wake(self) -> dict | None:
         was_playing = self.player.playing()
         if was_playing:
             self.player.pause()
-        handled = False  # True — сервер ответил по делу, плеером управляет его action
+        resp = None  # ответ по делу — плеером управляет его action
         try:
             play_file(SOUNDS["wake"])
             self.drain()  # не отправлять на сервер свой же сигнал
             samples = self.record_utterance()
             if samples is None:
                 log.info("тишина после слова активации")
-                return
-            play_file(SOUNDS["done"])
-            try:
-                resp = self.ask(samples)
-            except Exception as e:  # noqa: BLE001
-                log.error("сервер недоступен: %s", e)
-                play_file(SOUNDS["error"])
-                return
-            log.info("услышал: %r -> %r (%s)", resp.get("heard"), resp.get("reply"), resp.get("timing_ms"))
-            if not resp.get("heard"):  # ложное срабатывание
-                return
-            handled = True
-            self.apply_limits(resp.get("limits"))
-            if resp.get("speech_url"):
-                try:
-                    play_url(resp["speech_url"])
-                except Exception as e:  # noqa: BLE001
-                    log.error("не удалось проиграть ответ: %s", e)
-            self.apply_action(resp.get("action"), resp.get("limits"), was_playing)
+                return None
+            resp = self._exchange(samples, was_playing)
+            return resp
         finally:
             # любая неудача (тишина, сеть, пропал микрофон) — сказка не должна зависнуть на паузе
-            if was_playing and not handled:
+            if was_playing and resp is None:
                 self.player.resume()
+
+    def _wants_follow_up(self, resp: dict | None) -> bool:
+        """Продолжаем слушать без слова активации, только если это был разговор:
+        колонка что-то сказала, сказку не включали, режим не блокирующий."""
+        return bool(resp and resp.get("reply") and not resp.get("action")
+                    and not resp.get("blocked") and not resp.get("parent_command")
+                    and not self.player.playing())
+
+    def follow_up(self, wait_sec: float) -> dict | None:
+        """Ещё одна реплика без «Hey Jarvis»: тихий сигнал и ждём речь wait_sec секунд."""
+        d = CFG.get("dialog", {})
+        time.sleep(float(d.get("echo_guard_ms", 400)) / 1000)  # хвост ответа ещё звучит в Bluetooth
+        self.drain()
+        if d.get("follow_up_tone", True):
+            play_file(SOUNDS["listen"])
+            self.drain()
+        samples = self.record_utterance(no_speech=wait_sec)
+        if samples is None:
+            log.info("продолжения нет — жду слово активации")
+            return None
+        return self._exchange(samples, was_playing=False)
+
+    def dialog(self) -> None:
+        resp = self.on_wake()
+        d = CFG.get("dialog", {})
+        wait_sec = float(d.get("follow_up_sec", 6))
+        for _ in range(int(d.get("max_follow_ups", 5))):
+            if wait_sec <= 0 or not self._wants_follow_up(resp):
+                return
+            resp = self.follow_up(wait_sec)
 
     # --- фоновые задачи
 
@@ -429,7 +467,7 @@ class Client:
                 log.info("слово активации (%.2f)", score)
                 self.busy.set()
                 try:
-                    self.on_wake()
+                    self.dialog()
                 except Exception:  # noqa: BLE001
                     log.exception("ошибка в диалоге")
                 finally:
