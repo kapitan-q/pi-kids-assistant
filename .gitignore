@@ -6,3 +6,5 @@ data/state/*.json
 pi-client/.venv/
 pi-client/config.toml
 .speaker-password
+library/*
+!library/.gitkeep
