@@ -13,3 +13,4 @@ data/tales/
 data/merged/
 data/core/
 .admin-password
+data/replay-*.json

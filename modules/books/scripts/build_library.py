@@ -11,7 +11,7 @@
 (-c copy) во временном контейнере alpine, на сервер ничего не ставится.
 Результат — раскладка Audiobookshelf: library/<slug>/<slug>.mp3 + metadata.json (название, авторы,
 описание, теги; возраст — тегом «возраст:6-12»). Audiobookshelf подхватит папку сам (watcher),
-сервис tales — при следующем обновлении каталога (или POST /api/refresh).
+модуль books — при следующем обновлении каталога (или POST /refresh внутри compose-сети).
 """
 import json
 import os

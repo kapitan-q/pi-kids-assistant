@@ -1,4 +1,4 @@
-"""Режимы, расписание, временные команды родителя и лимиты для Pi.
+"""Режимы, расписание, роли и доступы, временные команды родителя и лимиты для Pi.
 
 Приоритет: временная команда родителя > расписание > default.
 Состояние (команды, «уже предупредили», бюджеты ночных сказок) — в JSON-файле.
@@ -43,9 +43,9 @@ def config() -> dict:
         try:
             _cfg = yaml.safe_load(CONFIG_PATH.read_text("utf-8")) or {}
             _cfg_mtime = mtime
-            log.info("policies.yaml загружен")
+            log.info("%s загружен", CONFIG_PATH.name)
         except yaml.YAMLError:
-            log.exception("ошибка в policies.yaml — оставляю прежний конфиг")
+            log.exception("ошибка в %s — оставляю прежний конфиг", CONFIG_PATH.name)
             _cfg = _cfg or DEFAULT_CONFIG
     return _cfg
 

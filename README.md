@@ -1,126 +1,154 @@
-# Колонка-сказочница: серверная часть
+# Домашняя голосовая колонка: ядро + модули
 
 ```
-Pi 3B (слово активации, микрофон, mpv → Bluetooth → Станция Лайт)
-   │  HTTPS + basic-auth
+Pi (слово активации, микрофон, mpv → Bluetooth-колонка)
+   │  HTTPS + basic-auth колонки
    ▼
-Traefik ──► gateway :8080 ──► stt    (faster-whisper, CPU)
-                         ├──► agent  (Claude Agent SDK) ──MCP──► tales (MCP + REST) ──► Audiobookshelf
-                         ├──► tts    (Piper)
-                         └──► /media (mp3 из ./library), /speech (озвученные ответы)
-Traefik ──► Audiobookshelf (/audiobookshelf, /admin, /books) — каталог: загрузка и описания с телефона
+Traefik ─► gateway ─┬─► stt      (faster-whisper)           ┐
+                    ├─► voiceid  (кто говорит, sherpa-onnx) ┘ параллельно
+                    ├─► agent    (Claude Agent SDK) ──MCP──► модули (books, …) + встроенный player
+                    ├─► tts      (Piper)
+                    └─► /admin   (профили, пароль родителя)
+Traefik ─► /m/books/stream/… ─► модуль books (файлы для плеера)
+Traefik ─► /audiobookshelf, /books ─► Audiobookshelf (каталог книг, свой вход, приложения для телефона)
+```
+
+**Ядро** (`core/`) — голос, агент, профили и родительский контроль. О конкретных источниках
+(сказки, музыка, YouTube) оно не знает: всё это **модули** (`modules/`), подключённые через MCP.
+
+```
+core/gateway   точка входа для Pi: STT/TTS, узнавание, знакомство, режимы, доступы, /admin
+core/agent     Claude + MCP-серверы модулей из config/modules.yaml + встроенный player
+core/stt core/tts core/voiceid
+modules/books  каталог сказок и аудиокниг поверх Audiobookshelf
+config/        speaker.yaml (роли, режимы, расписание), modules.yaml, lang/ru.yaml (фразы ядра)
+data/          состояние: core/ (профили, голоса), state/, logs/, books/, backups/ — не в git
+pi-client/     клиент для Raspberry Pi (README-pi.md)
 ```
 
 ## Запуск
 
-Наружу не публикуется ни один порт. Как открыть gateway — задаётся в `.env` через `COMPOSE_FILE`:
-
-- `docker-compose.yml:docker-compose.traefik.yml` — сервер titan, `https://ks.dameni.org` за Traefik
-  с basic-auth на весь хост (закрыты и API, и `/media`, `/speech`);
-- `docker-compose.yml:docker-compose.local.yml` — дома, порт 8080 в локальной сети (тогда задай `GATEWAY_TOKEN`).
+Наружу не публикуется ни один порт. Набор compose-файлов (ядро + модули + способ публикации) — в `.env`:
 
 ```bash
-cp .env.example .env        # ключ, пароли, BASIC_AUTH_USERS, ADMIN_TOKEN — см. комментарии в файле
+# titan, за Traefik:
+COMPOSE_FILE=docker-compose.yml:modules/books/compose.yml:docker-compose.traefik.yml:modules/books/compose.traefik.yml
+# дома, порт 8080 (задай GATEWAY_TOKEN):
+COMPOSE_FILE=docker-compose.yml:modules/books/compose.yml:docker-compose.local.yml
+```
+
+```bash
+cp .env.example .env        # ключ Anthropic, пароли, BASIC_AUTH_USERS, ADMIN_PASSWORD_HASH — см. комментарии
 docker compose up -d --build
-docker compose logs -f stt tts   # первый старт качает модели Whisper и голос Piper
-curl -u speaker:ПАРОЛЬ https://ks.dameni.org/health
+docker compose logs -f stt tts voiceid   # первый старт качает модели
+curl -u speaker:ПАРОЛЬ https://ks.dameni.org/health   # {"ok": ядро, "core": {...}, "modules": {...}}
 ```
 
-### Деплой на titan
+Деплой на titan — через git: репозиторий на сервере `~/workspace/kids-speaker` (ветка `master`):
+`git pull` (или push в него), затем `docker compose up -d --build --remove-orphans`.
 
-```bash
-# с ПК (из папки проекта)
-tar czf - --exclude=.git --exclude=.env --exclude=pi-client/.venv --exclude=pi-client/config.toml . \
-  | ssh titan 'tar xzf - -C ~/workspace/kids-speaker'
-# на titan
-cd ~/workspace/kids-speaker && docker compose up -d --build
-```
-
-- Первый запуск Audiobookshelf: `docker compose run --rm --no-deps -v ./modules/books/scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py`
-  — создаст администратора, библиотеку «Сказки», пользователя speaker и напечатает `ABS_API_KEY`/`ABS_LIBRARY_ID` для `.env`.
-- Бэкап: `scripts/backup.sh` — cron ежедневно в 04:00: база Audiobookshelf, описания сказок и режимы в `data/backups`, 14 дней.
-- Тесты шлюза: `docker compose run --rm --no-deps gateway sh -c "pip install -q pytest && pytest -q"`.
-
-## Библиотека — Audiobookshelf
-
-Каталог сказок живёт в [Audiobookshelf](https://www.audiobookshelf.org): `https://ks.dameni.org/admin`
-(или `/books`, `/audiobookshelf`), вход — логин Audiobookshelf. Там же приложения для телефона.
-
-- **Добавить сказку**: «Загрузить» → файлы (одна сказка = одна книга; можно несколькими файлами-главами).
-- **Описание обязательно**: без него сказка не попадёт в каталог колонки — по описанию Claude находит
-  сказку по героям и теме («про лису», «про принцессу»).
-- **Теги**: автор, тема, «на ночь» (только такие играют в ночном режиме), «короткая»/«длинная»,
-  возраст — тегом `возраст:6-12`. Тег `скрыть` — убрать сказку из колонки, не удаляя.
-- Колонка видит изменения в течение `CATALOG_REFRESH_SEC` (5 минут).
-- Книги из нескольких файлов колонка склеивает в один (`data/merged/`), так работают перемотка и
-  **продолжение с того места**: позицию прослушивания Pi сообщает раз в полминуту и при остановке,
-  она хранится в Audiobookshelf у пользователя `speaker`.
-
-На диске: `library/<сказка>/<файлы>.mp3` + `metadata.json` (так же их видит Audiobookshelf).
-Большие сборники с заготовленными описаниями удобнее разложить `modules/books/scripts/build_library.py`
-по манифесту — части склеиваются в один mp3, рядом кладётся `metadata.json`.
-
-## Проверка без Pi
-
-```bash
-AUTH=(-u speaker:ПАРОЛЬ); URL=https://ks.dameni.org
-# текстом
-curl -s "${AUTH[@]}" $URL/text -H 'Content-Type: application/json' \
-  -d '{"device_id":"test","text":"включи сказку про колобка"}' | jq
-
-# голосом (любой wav/mp3/ogg)
-curl -s "${AUTH[@]}" $URL/ask -F device_id=test -F audio=@question.wav | jq
-```
-
-`device_id` должен быть в `ALLOWED_DEVICES`. Если задан `GATEWAY_TOKEN` — добавь `-H 'X-Token: ...'`.
-
-Логи разговоров: `./data/logs/ГГГГ-ММ-ДД.jsonl` (что услышал, что ответил, какие инструменты, стоимость),
-хранятся `LOG_RETENTION_DAYS` дней.
-Системный промпт: `agent/system_prompt.md`, подхватывается после `docker compose restart agent`.
-
-## MCP сказок
-
-MCP сервиса `tales` (`/mcp`) доступен только внутри compose-сети. Агенту выдаётся 9 инструментов:
-поиск, случайная сказка, теги, подробности и команды плееру — без правки каталога.
-Ключ Audiobookshelf у `tales` — пользователя `speaker`: только чтение и прогресс прослушивания.
-
-## Сервер на Windows (вариант «дома»)
-
-- `COMPOSE_FILE=docker-compose.yml:docker-compose.local.yml`, задай `GATEWAY_TOKEN`.
-- **Docker в WSL2**: Pi по умолчанию не видит порты WSL. На Windows 11 добавь в `%UserProfile%\.wslconfig`:
+- Бэкап: `scripts/backup.sh` — cron в 04:00: база Audiobookshelf, `metadata.json` книг, `config/`,
+  `data/state`, `data/core` (профили и голоса), `data/books`; хранится 14 дней в `data/backups`.
+- Тесты (в контейнерах, `config/` смонтирован):
+  ```bash
+  docker compose run --rm --no-deps -v ./core/gateway/tests:/app/tests gateway sh -c "pip install -q pytest && python -m pytest -q tests"
+  docker compose run --rm --no-deps agent sh -c "pip install -q pytest && python -m pytest -q tests"
+  docker compose run --rm --no-deps books sh -c "pip install -q pytest && python -m pytest -q tests"
   ```
-  [wsl2]
-  networkingMode=mirrored
-  ```
-  и выполни `wsl --shutdown`. Плюс разреши входящие 8080 в брандмауэре Windows.
-- **VirtualBox**: сетевой адаптер в режиме «Сетевой мост».
+- Сквозная проверка через `/text`: `python3 scripts/smoke_test.py`;
+  регрессия агента на реальных фразах из логов: `scripts/replay_phrases.py run|diff`.
 
-## Настройка скорости
+## Модули
 
-- Whisper: `WHISPER_MODEL=base` быстрее, `small` точнее. `WHISPER_THREADS` = число физических ядер,
-  `STT_CPUS` — сколько ядер сервера отдать контейнеру.
-- Claude: `claude-haiku-5-5` быстрее и дешевле, `claude-sonnet-5-5` умнее. `AGENT_TURN_TIMEOUT` — сколько ждать ответа.
-- Ответ в `timing_ms` показывает, где тратится время.
+Модуль — отдельный контейнер (свой `modules/<имя>/compose.yml`), ядро знает о нём только из
+`config/modules.yaml`:
+
+```yaml
+modules:
+  books:
+    title: Сказки и аудиокниги
+    url: http://books:8000
+    enabled: true          # false — агент не видит инструментов, /health его не проверяет
+```
+
+Контракт:
+
+| Адрес модуля | Кто пользуется | Что |
+|---|---|---|
+| `{url}/mcp` | агент | MCP-инструменты; `instructions` сервера попадают в системный промпт (как пользоваться модулем) |
+| `{url}/svc/mcp` | шлюз | служебные MCP-инструменты: `report_progress(item_id, position, finished)`, `item_info(item_id)` |
+| `{url}/stream/…` | Pi | файлы для плеера; снаружи — `$PUBLIC_BASE_URL/m/<имя>/stream/…` |
+| `{url}/health` | шлюз | `{"ok": true}`; упавший модуль не роняет `/health` ядра |
+
+**Включить что-то** = инструмент модуля возвращает JSON с полем `player`:
+
+```json
+{"player": {"type": "play", "item_id": "…", "title": "…", "tags": ["на ночь"], "age_min": 6,
+            "path": "stream/…", "start": 120}, "playing": "…"}
+```
+
+- `path` — только относительный `stream/…`; полный url собирает шлюз. `source` модуль не задаёт —
+  агент берёт его из имени MCP-сервера. Модулю можно только `play`; стоп, пауза, перемотка и громкость —
+  у встроенного сервера `player` ядра.
+- Шлюз проверяет каждую команду по схеме (`core/gateway/actions.py`) и правилам режима/профиля
+  (теги, возраст, разрешённые модули, бюджет), в том числе при «продолжай» и перемотке.
+- `play_*` не должны иметь необратимых эффектов: шлюз может отказать (кроме счётчиков — можно).
+
+**Как добавить модуль** (например, музыку):
+1. `modules/music/` — FastMCP-сервер по образцу `modules/books/app.py` (`/mcp` с `instructions`,
+   `/svc/mcp`, `/stream/…`, `/health`), `Dockerfile`, `compose.yml`, при публикации — `compose.traefik.yml`
+   с роутером `PathPrefix(/m/music/stream/)` и своей копией basic-auth (см. books).
+2. Запись в `config/modules.yaml`, файлы — в `COMPOSE_FILE`.
+3. Роли в `config/speaker.yaml`: добавить модуль в `modules` тем, кому можно.
+
+## Модуль books — Audiobookshelf
+
+Каталог живёт в [Audiobookshelf](https://www.audiobookshelf.org): `https://ks.dameni.org/books`
+(→ `/audiobookshelf`), вход — логин Audiobookshelf. Книги можно слушать и без колонки — с телефона, в машине.
+
+- **Добавить**: «Загрузить» → файлы (одна книга = одна или несколько глав).
+- **Описание обязательно**: без него книга не попадёт в колонку — по описанию Claude ищет «про лису».
+- **Теги**: автор, тема, «на ночь» (только такие играют ночью), возраст — `возраст:6-12`
+  (младше нижней границы колонка не включит), `скрыть` — убрать из колонки, не удаляя.
+- Изменения видны через `CATALOG_REFRESH_SEC` (5 минут). Многофайловые книги склеиваются в `data/merged/`;
+  место остановки хранится в Audiobookshelf у пользователя `speaker` — «продолжи» начинает с того места.
+- Первый запуск: `docker compose run --rm --no-deps -v ./modules/books/scripts:/s -e ABS_ROOT_PASSWORD gateway python /s/abs_setup.py`
+  — администратор, библиотека, пользователь speaker; печатает `ABS_API_KEY`/`ABS_LIBRARY_ID` для `.env`.
+- Сборники по манифесту: `modules/books/scripts/build_library.py`.
+
+## Профили, голос, админка
+
+- **Знакомство**: человек говорит колонке «давай познакомимся» — она спрашивает имя, возраст и просит
+  повторить четыре фразы (одним разговором, без слова активации). Получается профиль с ролью
+  `newcomer` и голосовым отпечатком (`data/core/voices/`). Дальше колонка узнаёт его по голосу
+  (сервис `voiceid`, порог `voice.threshold` в `speaker.yaml`; ниже порога — гость `guest`).
+  Узнанный человек может сказать «давай познакомимся» ещё раз — голос допишется к его профилю.
+- **`/admin`** (`https://ks.dameni.org/admin`, пользователь `ADMIN_USER`, пароль родителя —
+  bcrypt в `ADMIN_PASSWORD_HASH`; пароль колонки не подходит): список профилей, роль, возраст,
+  обращения для команд («старш»), личные ограничения (модули, запрещённые теги), **объединить**
+  (перенести голос в существующий профиль — например, в «Старший», на которого ссылается расписание),
+  удалить (вместе с голосом).
+- **Роли** — `config/speaker.yaml`, `roles`: что можно по умолчанию (`modules`, `tags_deny`, `parent`).
+  Профиль в админке может только сузить роль. Повысить роль новичка можно только в админке:
+  голосом к чужому профилю голос не привязывается, иначе ребёнок мог бы назваться «Папой».
+- Родитель, узнанный по голосу, обходит детские ограничения контента и даёт команды без кодовой
+  фразы, но **снимать режимы голосом** не может (голос можно перепутать) — только `/control`
+  с `ADMIN_TOKEN` или `parent.voice_can_relax: true`.
 
 ## Режимы и родительский контроль
 
-Всё в `config/policies.yaml` (перечитывается на лету). Правила проверяет **шлюз**, а не Claude,
-поэтому уговорить колонку нарушить режим нельзя — в том числе «продолжай» и перемотку
-сказки, которая не подходит под текущий режим.
+`config/speaker.yaml`, перечитывается на лету. Правила проверяет **шлюз**, а не Claude, поэтому
+уговорить колонку нарушить режим нельзя.
 
-- **Режимы**: `normal`, `quiet` (тихий час), `homework` (уроки), `night` (ночь). Свои — добавляй в `modes`.
-- **Расписание**: первое подходящее правило побеждает; окна через полночь работают.
-- **Ночь**: громкость не выше 30, только сказки с тегом «на ночь», 60 минут от первой сказки за ночь —
-  Pi получает `limits.stop_after_sec` и сам выключает сказку по таймеру.
-- **Блокирующие режимы** (`allow_children: false`): ребёнку один раз говорится `message`, дальше колонка молчит.
+- **Режимы**: `normal`, `quiet` (тихий час), `homework` (уроки), `night` (ночь); свои — в `modes`.
+  Поля: `max_volume`, `tags` (только с этими тегами), `play_budget_min`, `allow_children`, `modules`, сообщения.
+- **Расписание**: первое подходящее правило побеждает; окна через полночь работают;
+  `who` — id профилей и/или роли (`who: [child]`).
+- **Ночь**: громкость ≤ 30, только «на ночь», 60 минут — Pi получает `limits.stop_after_sec` и гасит сам.
+- **Кодовая фраза** (голосом, только ужесточать): «Капитан Немо, тихий час на сорок пять минут»,
+  «…режим уроков для старшего до пяти». Не снимает блокировки и не уходит к Claude.
 
-Родительские команды голосом — через кодовую фразу из конфига:
-«Капитан Немо, тихий час на сорок пять минут», «…режим уроков для старшего до пяти», «…ночной режим».
-Голосом можно только **ужесточать**: фразу легко подслушать. Она не снимает блокировки и не уходит к Claude.
-Снять режим голосом («…отбой тишины») можно, только если `parent.voice_can_relax: true`, иначе — через админку.
-Снятие возвращает обычный режим и поверх расписания (ночь, уроки) — до конца текущего окна.
-
-Админка по HTTP (basic-auth + `X-Admin-Token`; пустой `ADMIN_TOKEN` — админка выключена):
+Управление по HTTP (для скриптов; basic-auth колонки + `X-Admin-Token`):
 
 ```bash
 A=(-u speaker:ПАРОЛЬ -H "X-Admin-Token: $ADMIN_TOKEN"); URL=https://ks.dameni.org
@@ -128,21 +156,16 @@ curl -s "${A[@]}" $URL/control/status | jq
 curl -s "${A[@]}" -X POST $URL/control/override -H 'Content-Type: application/json' \
   -d '{"mode":"homework","minutes":90,"who":["older"]}'
 curl -s "${A[@]}" -X DELETE $URL/control/override        # обычный режим (и поверх расписания)
-```
-
-Проверка от лица конкретного ребёнка (пока нет узнавания голоса; `speaker` учитывается только с admin-токеном):
-
-```bash
+# от лица профиля (speaker учитывается только с admin-токеном)
 curl -s "${A[@]}" $URL/text -H 'Content-Type: application/json' \
   -d '{"device_id":"test","text":"включи колобка","speaker":"older"}' | jq
 ```
 
-Пока голоса не распознаются, говорящий «неизвестен», и при `unknown_speaker_matches: true`
-правило «уроки для старшего» действует на всех.
+## Настройка
 
-## Что дальше
-
-- Клиент для Pi — в папке `pi-client/` (см. README-pi.md).
-- Telegram-бот поверх `/control/*` вместо голосового снятия режимов.
-- Озвучка текстовых сказок заранее (Silero TTS) и импорт как аудио.
-- RFID-карточки «приложил — играет» в духе Phoniebox.
+- Фразы ядра — `config/lang/ru.yaml`; системный промпт ядра — `core/agent/prompt.md`,
+  модуля books — `modules/books/prompt.md` (оба применяются после пересборки сервиса).
+- Скорость: `WHISPER_MODEL` (`base` быстрее, `small` точнее), `WHISPER_THREADS`, `STT_CPUS`;
+  `CLAUDE_MODEL`; в ответе `/ask` есть `timing_ms`.
+- Логи разговоров: `data/logs/ГГГГ-ММ-ДД.jsonl`, хранятся `LOG_RETENTION_DAYS` дней.
+- Вариант «дома» на Windows/WSL2: `networkingMode=mirrored` в `.wslconfig` и входящий 8080 в брандмауэре.
