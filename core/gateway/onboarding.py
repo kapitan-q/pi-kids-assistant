@@ -4,7 +4,8 @@
 предыдущие) — образец голоса. Новый профиль получает роль newcomer_role; роль выше назначает
 только родитель в /admin. Голос к существующему профилю здесь не привязывается — иначе ребёнок
 мог бы назваться «Папой»; для этого в админке есть «объединить». Исключение — человек уже узнан
-по голосу: тогда можно дописать образцы к его же профилю.
+по голосу: тогда можно дописать образцы к его же профилю, но не завести второй под другим именем
+(проверяется и на старте, и в конце по всем образцам). Новые знакомства родитель может запретить в /admin.
 """
 import logging
 import re
@@ -152,6 +153,8 @@ def start(device_id: str, u: Utterance, known: str | None) -> dict:
     if known and profiles.store.get(known):
         s = sessions[device_id] = Session(state="known", target=known, name=profiles.store.get(known).name)
         return _say("known", name=s.name)
+    if not policy.onboarding_enabled():
+        return {"reply": lang.t("onboarding.closed"), "expect_reply": False}
     if len(profiles.store.all()) >= int(policy.config().get("max_profiles", 12)):
         return {"reply": lang.t("onboarding.too_many"), "expect_reply": False}
     sessions[device_id] = Session(state="name")
@@ -172,6 +175,9 @@ def step(device_id: str, u: Utterance) -> dict:
         if _answer(u.text) == "yes":
             s.state, s.phrase = "phrase", 0
             return _say("repeat_intro", phrase=phrases()[0])
+        if _answer(u.text) == "no":                 # «я не Петя» — под другим именем не знакомимся
+            log.warning("знакомство на %s: голос узнан как %s, отказ от перезаписи", device_id, s.target)
+            return _end(device_id, "known_other", name=s.name)
         return _end(device_id, "known_no")
 
     if s.state == "name":
@@ -231,6 +237,15 @@ def finish(device_id: str, s: Session) -> dict:
         profiles.store.update(s.target, voice={"samples": n, "updated_at": time.time()})
         log.info("знакомство на %s: дописан голос %s (%d образцов)", device_id, s.target, n)
         return _end(device_id, "done_again", name=s.name)
+    # Голос по всем образцам похож на уже известный профиль — второй профиль тому же человеку не заводим
+    # (на старте по одной фразе могло не хватить уверенности).
+    dup, score = voices.store.identify(voices.mean(s.vectors))
+    threshold = float(conf().get("threshold", 0.6))
+    if dup and score >= threshold and profiles.store.get(dup):
+        log.warning("знакомство на %s: «%s» — это голос профиля %s (%.2f), отказ", device_id, s.name, dup, score)
+        return _end(device_id, "known_other", name=profiles.store.get(dup).name)
+    if not policy.onboarding_enabled():
+        return _end(device_id, "closed")
     p = profiles.store.create(s.name, policy.config().get("newcomer_role", "newcomer"), s.age)
     n = voices.store.save(p.id, s.samples, s.vectors, s.model)
     profiles.store.update(p.id, voice={"samples": n, "updated_at": time.time()}, last_seen=time.time())

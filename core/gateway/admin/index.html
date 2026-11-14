@@ -51,6 +51,9 @@
   .mode-on { color: var(--danger); font-weight: 600; }
   #now .actions { margin-top: 10px; }
   main > h1:not(:first-child) { margin-top: 28px; }
+  .toggle { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+  .switch { display: inline-flex; gap: 8px; align-items: center; color: var(--text); font-size: 15px;
+            font-weight: 600; margin: 0; }
 </style>
 </head>
 <body>
@@ -63,6 +66,10 @@
   <h1>Профили колонки</h1>
   <p class="lead">Новый профиль появляется, когда человек скажет колонке «давай познакомимся».
     Здесь назначаются роль и ограничения.</p>
+  <div class="card toggle">
+    <label class="switch"><input type="checkbox" id="onboarding" disabled> Разрешить новые знакомства</label>
+    <span class="status" id="onboarding-status">Узнанный голос может только перезаписать свой профиль.</span>
+  </div>
   <div id="list"><div class="empty">Загружаю…</div></div>
   <p class="help">Роли и режимы описаны в <code>config/speaker.yaml</code>. Личные ограничения только сужают роль.
     «Объединить» переносит записанный голос в другой профиль (например, в «Старший»),
@@ -179,6 +186,8 @@ function renderNow(c) {
         <span class="status">${esc(SOURCE[r.source] ?? "")}</span></div>
       ${r.restricted && r.id ? `<button data-who="${esc(r.id)}">Снять</button>` : ""}
     </div>`).join("");
+  const ob = $("#onboarding");
+  ob.checked = c.onboarding_enabled; ob.disabled = false;
   const any = c.people.some(r => r.restricted);
   $("#now").innerHTML = rows + `<div class="actions">
       ${any ? '<button class="primary" data-who="">Снять все ограничения</button>' : '<span class="status">Ограничений нет</span>'}
@@ -197,6 +206,12 @@ $("#now").addEventListener("click", async ev => {
   if (!confirm(who ? "Вернуть обычный режим для этого профиля?" : "Вернуть обычный режим для всех?")) return;
   try { renderNow(await api("POST", "/control/relax", {who: who ? [who] : null})); }
   catch (e) { $("#now-status").textContent = "Ошибка: " + e.message; }
+});
+
+$("#onboarding").addEventListener("change", async ev => {
+  const on = ev.target.checked;
+  try { renderNow(await api("POST", "/settings", {onboarding_enabled: on})); }
+  catch (e) { ev.target.checked = !on; $("#onboarding-status").textContent = "Ошибка: " + e.message; }
 });
 
 load();

@@ -143,6 +143,17 @@ class RelaxIn(BaseModel):
     who: list[str] | None = None      # None — снять для всех (и для неузнанного голоса)
 
 
+class SettingsIn(BaseModel):
+    onboarding_enabled: bool
+
+
+@router.post("/api/settings")
+def settings(body: SettingsIn):
+    policy.set_onboarding(body.onboarding_enabled)
+    log.info("новые знакомства %s из админки", "разрешены" if body.onboarding_enabled else "запрещены")
+    return policy.overview()
+
+
 @router.get("/api/control")
 def control():
     return policy.overview()

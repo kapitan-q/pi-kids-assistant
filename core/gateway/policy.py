@@ -388,6 +388,18 @@ def check_playback(res: Resolved, item: dict | None, acc: dict | None = None) ->
     return None
 
 
+def onboarding_enabled() -> bool:
+    """Можно ли знакомиться с колонкой (новые профили). Переключается в /admin, хранится в state.json."""
+    with state.lock:
+        return bool(state.data.get("onboarding_enabled", True))
+
+
+def set_onboarding(enabled: bool) -> None:
+    with state.lock:
+        state.data["onboarding_enabled"] = bool(enabled)
+        state.save()
+
+
 def overview() -> dict:
     """Что действует сейчас: на неузнанный голос и на каждый не родительский профиль (для /admin)."""
     default = config().get("default_mode", "normal")
@@ -398,7 +410,8 @@ def overview() -> dict:
         rows.append({"id": pid, "name": name, "mode": r.mode, "title": r.conf.get("title", r.mode),
                      "until": r.until.isoformat(timespec="minutes") if r.until else None,
                      "source": r.source, "restricted": r.mode != default})
-    return {"now": now().isoformat(timespec="minutes"), "default_mode": default, "people": rows}
+    return {"now": now().isoformat(timespec="minutes"), "default_mode": default, "people": rows,
+            "onboarding_enabled": onboarding_enabled()}
 
 
 def status() -> dict:

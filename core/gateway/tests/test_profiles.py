@@ -117,3 +117,12 @@ def test_admin_shows_and_relaxes_modes(client, at):
     r = client.post("/admin/api/control/relax", headers=auth(), json={"who": None})
     assert not any(row["restricted"] for row in r.json()["people"])
     policy.clear_overrides()
+
+
+def test_admin_onboarding_toggle(client):
+    assert client.get("/admin/api/control", headers=auth()).json()["onboarding_enabled"] is True
+    assert client.post("/admin/api/settings", json={"onboarding_enabled": False}).status_code == 401
+    r = client.post("/admin/api/settings", headers=auth(), json={"onboarding_enabled": False})
+    assert r.json()["onboarding_enabled"] is False and policy.onboarding_enabled() is False
+    client.post("/admin/api/settings", headers=auth(), json={"onboarding_enabled": True})
+    assert policy.onboarding_enabled()

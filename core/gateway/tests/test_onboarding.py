@@ -123,3 +123,40 @@ def test_voice_only_and_profile_limit(monkeypatch):
     assert not ob.start("d8", ob.Utterance(text="давай познакомимся"), None)["expect_reply"]
     monkeypatch.setattr(ob.policy, "config", lambda: {"max_profiles": 1, "voice": {}})
     assert "много" in ob.start("d8", voice(8)("давай познакомимся"), None)["reply"]
+
+
+def test_known_voice_cannot_become_someone_else():
+    petya = voice(10)
+    p = profiles.store.create("Петя", "child", 7)
+    r = ob.start("d9", petya("давай познакомимся"), p.id)
+    assert "Петя" in r["reply"]
+    r = ob.step("d9", petya("нет я вася"))
+    assert not r["expect_reply"] and "Ай-ай-ай" in r["reply"] and "Петя" in r["reply"]
+    assert profiles.store.by_name("Вася") is None
+    profiles.store.delete(p.id)
+
+
+def test_recognized_at_finish_is_refused():
+    """На старте голос не узнан (одна фраза), но по всем образцам — это Петя: второй профиль не заводим."""
+    petya = voice(11)
+    p = profiles.store.create("Петя", "child", 7)
+    voices.store.save(p.id, [b"RIFF"] * 4, [petya("x").vector for _ in range(4)], MODEL)
+    ob.start("d10", petya("давай познакомимся"), None)
+    replies = run("d10", petya, ["Вася", "да", "семь", *phrases()])
+    assert "Ай-ай-ай" in replies[-1]["reply"] and "Петя" in replies[-1]["reply"]
+    assert profiles.store.by_name("Вася") is None
+    profiles.store.delete(p.id)
+    voices.store.delete(p.id)
+
+
+def test_onboarding_can_be_closed():
+    ob.policy.set_onboarding(False)
+    try:
+        r = ob.start("d11", voice(12)("давай познакомимся"), None)
+        assert not r["expect_reply"] and "родител" in r["reply"]
+        kid = voice(13)                                          # узнанный может перезаписать свой голос
+        p = profiles.store.create("Таня", "child", 8)
+        assert ob.start("d12", kid("давай познакомимся"), p.id)["expect_reply"]
+        profiles.store.delete(p.id)
+    finally:
+        ob.policy.set_onboarding(True)
