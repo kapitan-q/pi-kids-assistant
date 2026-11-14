@@ -82,18 +82,27 @@ def row_to_dict(row: dict) -> dict:
     return d
 
 
+VOWELS = set("аеёиоуыэюяйь")
+
+
 def _stem(word: str) -> str:
-    """Грубый стемминг: отрезаем окончание, чтобы «колобка» нашёл «Колобок».
-    ngram-индекс ищет слово как цепочку биграмм, т.е. по сути подстроку."""
-    if len(word) <= 4:
-        return word
-    return word[: max(4, len(word) - 2)]
+    """Грубый стемминг: отрезаем окончание, чтобы «колобка» нашёл «Колобок», «лису» — «лиса»,
+    «зиму» — «зима». ngram-индекс ищет слово как цепочку биграмм, т.е. по сути подстроку.
+    Согласную на конце короткого слова не трогаем: «волк» → «вол» нашёл бы «волшебство»."""
+    w = word if len(word) <= 4 else word[: max(4, len(word) - 2)]
+    while len(w) > 3 and w[-1] in VOWELS:
+        w = w[:-1]
+    return w
+
+
+def stems_of(query: str) -> list[str]:
+    words = re.findall(r"[\w-]+", query.lower().replace("ё", "е"))
+    stems = [_stem(w).replace("-", "") for w in words if w not in STOPWORDS]
+    return list(dict.fromkeys(s for s in stems if len(s) >= 3))
 
 
 def build_ft_query(query: str) -> str | None:
-    words = re.findall(r"[\w-]+", query.lower())
-    stems = [_stem(w) for w in words if w not in STOPWORDS]
-    stems = [s.replace("-", "") for s in stems if len(s) >= 3]
+    stems = stems_of(query)
     # в BOOLEAN MODE слова через пробел = «любое из»
     return " ".join(stems) if stems else None
 
@@ -119,15 +128,24 @@ def search(query: str = "", age: int | None = None, max_minutes: int | None = No
     ft = build_ft_query(query or "")
     with cursor() as cur:
         if ft:
+            # ngram находит и середину слова («лис» в «Василисе»), поэтому совпадение
+            # с начала слова поднимаем в выдаче: в названии и тегах — сильнее, в описании — слабее
+            bonus, bonus_params = "", []
+            for s in stems_of(query):
+                pattern = r"(^|[^\p{L}])" + s.replace("е", "[её]")  # «елка» ↔ «ёлка»
+                bonus += " + (REGEXP_LIKE(CONCAT_WS(' ', title, tags), %s, 'i')) * 4" \
+                         " + (REGEXP_LIKE(CONCAT_WS(' ', author, description), %s, 'i')) * 2"
+                bonus_params += [pattern, pattern]
             sql = (
                 "SELECT *, "
                 " MATCH(title) AGAINST (%s IN BOOLEAN MODE) * 3 "
-                " + MATCH(title, author, description, tags) AGAINST (%s IN BOOLEAN MODE) AS score "
+                " + MATCH(title, author, description, tags) AGAINST (%s IN BOOLEAN MODE)"
+                + bonus + " AS score "
                 "FROM tales WHERE MATCH(title, author, description, tags) AGAINST (%s IN BOOLEAN MODE)"
                 + "".join(f" AND {w}" for w in where)
                 + " ORDER BY score DESC LIMIT %s"
             )
-            cur.execute(sql, [ft, ft, ft, *params, limit])
+            cur.execute(sql, [ft, ft, *bonus_params, ft, *params, limit])
         else:
             sql = ("SELECT * FROM tales" + (" WHERE " + " AND ".join(where) if where else "")
                    + " ORDER BY play_count DESC, title LIMIT %s")
