@@ -114,7 +114,7 @@ def test_ordinary_phrases_of_controller_are_not_mode_commands(text, at, no_tts, 
 
     async def agent(*_a, **_k):
         raise app.httpx.ConnectError("нет агента в тестах")
-    monkeypatch.setattr(app, "http", type("H", (), {"post": agent})())
+    monkeypatch.setattr(app, "http", type("H", (), {"post": agent})(), raising=False)
     d = say(text, "dad")
     assert not d.get("parent_command") and policy.overrides() == []
 
@@ -242,7 +242,7 @@ def test_admin_control(client, at):
                                                                        "who": ["younger"]})
     assert {row["id"]: row for row in r.json()["people"]}["younger"]["mode"] == "quiet"
     r = client.post("/admin/api/control/override", headers=auth(), json={"mode": "night", "until": "19:00"})
-    assert {row["id"]: row for row in r.json()["people"]}["older"]["until"].endswith("19:00")
+    assert {row["id"]: row for row in r.json()["people"]}["older"]["until"][11:16] == "19:00"
     assert client.post("/admin/api/control/override", headers=auth(), json={"mode": "nope"}).status_code == 400
     r = client.post("/admin/api/control/relax", headers=auth(), json={"who": None})
     assert not any(row["restricted"] for row in r.json()["people"])
