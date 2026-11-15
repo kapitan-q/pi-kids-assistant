@@ -26,13 +26,19 @@ HOUR_WORDS = {
 MIN_RE = re.compile(r"^мин(ут[аы]?|уту|\.)?$")
 HOUR_RE = re.compile(r"^час(а|ов|ик|ика)?$")
 
-# порядок важен: «отбой тишины» — это снятие, а не тишина
+# Команда — только фраза целиком: ключевая фраза режима + «для кого» + время + служебные слова.
+# Что-то сверх этого («сказка про уроки», «сними с паузы») — не команда, пусть решает агент.
+# Порядок важен: «отбой тишины» — это снятие, а не тишина.
 MODE_PATTERNS = [
-    ("clear", r"отбой|отмен|сними|выключи режим|обычн\w* режим|можно отвечать"),
-    ("homework", r"урок"),
-    ("night", r"ночн|режим сна"),
-    ("quiet", r"тих\w* час|не отвечай|помолчи|тишин|молчи"),
+    ("clear", r"отбой(?: режима| режимов| тишины| тихого часа| уроков)?|обычный режим|выключи режим|"
+              r"отмени режим|сними (?:режим|ограничения|все ограничения)|можно отвечать"),
+    ("homework", r"режим уроков|время уроков|делаем уроки|уроки"),
+    ("night", r"ночной режим|режим сна"),
+    ("quiet", r"тихий час|режим тишины|тишина|помолчи|не отвечай"),
 ]
+SERVICE_WORDS = {"пожалуйста", "давай", "включи", "поставь", "сделай", "колонка", "на", "до", "для", "всех",
+                 "всем", "с", "половиной", "и", "ну", "режим", "полчаса", "полчасика", "ровно"}
+CLOCK_RE = re.compile(r"^\d{1,2}(?:[:.]\d{2})?$")
 
 
 def normalize(text: str) -> str:
@@ -112,18 +118,44 @@ def parse_until(t: str, now: datetime) -> datetime | None:
     return now + timedelta(minutes=minutes) if minutes else None
 
 
-def parse_who(t: str, profiles: dict) -> list[str] | None:
-    who = [pid for pid, p in profiles.items()
-           if any(a.lower() in t for a in p.get("aliases", []))]
-    return who or None
+def _stems(p: dict) -> list[str]:
+    """Как можно назвать человека или роль: обращения (начало слова: «старш» → «старшего») и имя
+    без последней буквы («Маша» → «маш»: маши, машей)."""
+    out = [a.lower() for a in p.get("aliases") or [] if a]
+    name = normalize(p.get("name") or "")
+    if name and " " not in name:
+        out.append(name[:-1] if len(name) > 3 else name)
+    return out
 
 
-def parse(text: str, profiles: dict, now: datetime) -> dict | None:
-    t = normalize(text)
+def parse_who(tokens: list[str], targets: dict) -> tuple[list[str] | None, set[int]]:
+    """targets — {id: {"name", "aliases"}} людей и ролей. (кого назвали | None, номера слов)."""
+    who, used = [], set()
+    for i, tok in enumerate(tokens):
+        for tid, p in targets.items():
+            if any(tok.startswith(s) for s in _stems(p)):
+                used.add(i)
+                if tid not in who:
+                    who.append(tid)
+    return (who or None), used
+
+
+def _time_word(w: str) -> bool:
+    return (w in NUM_WORDS or w in HOUR_WORDS or w in SERVICE_WORDS or bool(CLOCK_RE.match(w))
+            or bool(MIN_RE.match(w)) or bool(HOUR_RE.match(w)))
+
+
+def parse(text: str, targets: dict, now: datetime) -> dict | None:
+    """{"mode", "who", "until"} или None (не команда)."""
+    t = normalize(text).strip(" .")
     for mode, pattern in MODE_PATTERNS:
-        if re.search(pattern, t):
-            cmd = {"mode": mode, "who": parse_who(t, profiles), "until": None}
-            if mode != "clear":
-                cmd["until"] = parse_until(t, now)
-            return cmd
+        m = re.search(rf"(?<!\w)(?:{pattern})(?!\w)", t)
+        if not m:
+            continue
+        rest = (t[:m.start()] + " " + t[m.end():]).replace(".", " ").split()
+        who, used = parse_who(rest, targets)
+        if any(i not in used and not _time_word(w) for i, w in enumerate(rest)):
+            return None
+        until = parse_until(t, now) if mode != "clear" else None
+        return {"mode": mode, "who": who, "until": until}
     return None

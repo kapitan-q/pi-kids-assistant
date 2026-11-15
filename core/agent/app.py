@@ -64,8 +64,26 @@ def load_modules() -> dict[str, dict]:
     return {name: m for name, m in (data.get("modules") or {}).items() if m.get("enabled", True)}
 
 
-def make_options(modules: dict[str, dict]) -> ClaudeAgentOptions:
-    servers: dict = {name: {"type": "http", "url": m["url"].rstrip("/") + "/mcp"} for name, m in modules.items()}
+def module_headers(name: str, rights: dict | None) -> dict[str, str]:
+    """Права говорящего для модуля — заголовками MCP-запросов (модуль по ним фильтрует; ASCII-JSON)."""
+    if rights is None:
+        return {}
+    h = {"X-KS-Rights": json.dumps((rights.get("modules") or {}).get(name) or {})}
+    if rights.get("age") is not None:
+        h["X-KS-Age"] = str(int(rights["age"]))
+    return h
+
+
+def make_options(modules: dict[str, dict], rights: dict | None = None) -> ClaudeAgentOptions:
+    """rights — от шлюза: {"modules": {имя: права модуля}, "age"}. Модули не из списка не подключаются:
+    у говорящего нет к ним доступа (или режим их не разрешает). None — подключить все (без шлюза, тесты)."""
+    if rights is not None:
+        modules = {n: m for n, m in modules.items() if n in (rights.get("modules") or {})}
+    servers: dict = {}
+    for name, m in modules.items():
+        servers[name] = {"type": "http", "url": m["url"].rstrip("/") + "/mcp"}
+        if h := module_headers(name, rights):
+            servers[name]["headers"] = h
     servers[player.SERVER_NAME] = player.server
     opts = dict(
         model=MODEL,
@@ -117,6 +135,7 @@ class Session:
         self.last_used = time.monotonic()
         self.lock = asyncio.Lock()
         self.stale = False   # модуль был недоступен при старте сессии — пересоздать после хода
+        self.rights_key: str | None = None   # права, с которыми подключены модули
 
     async def close(self) -> None:
         if self.client:
@@ -127,12 +146,16 @@ class Session:
         self.client = None
         self.stale = False
 
-    async def ensure(self) -> ClaudeSDKClient:
-        if self.client and (self.stale or time.monotonic() - self.last_used > IDLE_SEC):
-            log.info("session stale/idle, starting fresh")
+    async def ensure(self, rights: dict | None = None) -> ClaudeSDKClient:
+        """Права другие (сменился говорящий, режим закрыл модуль) — новый разговор с другими модулями:
+        заодно ребёнок не продолжает чужой диалог."""
+        key = json.dumps(rights, sort_keys=True, ensure_ascii=False)
+        if self.client and (self.stale or time.monotonic() - self.last_used > IDLE_SEC or key != self.rights_key):
+            log.info("session stale/idle/rights changed, starting fresh")
             await self.close()
         if self.client is None:
-            self.client = ClaudeSDKClient(options=make_options(load_modules()))
+            self.client = ClaudeSDKClient(options=make_options(load_modules(), rights))
+            self.rights_key = key
             await asyncio.wait_for(self.client.connect(), TURN_TIMEOUT)
         self.last_used = time.monotonic()
         return self.client
@@ -182,6 +205,7 @@ class ChatIn(BaseModel):
     device_id: str = "default"
     text: str
     context: str | None = None  # служебная пометка от шлюза: кто говорит, режим, доступы
+    rights: dict | None = None  # {"modules": {имя: права модуля}, "age"} — какие модули подключить и с чем
 
 
 class ResetIn(BaseModel):
@@ -255,7 +279,7 @@ async def chat(body: ChatIn):
     t0 = time.monotonic()
     async with session.lock:
         try:
-            await session.ensure()
+            await session.ensure(body.rights)
             prompt = f"[Служебно: {body.context}]\n{body.text}" if body.context else body.text
             result = await asyncio.wait_for(run_turn(session, prompt), TURN_TIMEOUT)
         except Exception as e:  # noqa: BLE001  (в т.ч. TimeoutError)

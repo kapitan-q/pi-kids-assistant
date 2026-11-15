@@ -151,7 +151,7 @@ def test_recognized_at_finish_is_refused():
 
 
 def test_onboarding_can_be_closed():
-    ob.policy.set_onboarding(False)
+    ob.policy.set_setting("onboarding_enabled", False)
     try:
         r = ob.start("d11", voice(12)("давай познакомимся"), None)
         assert not r["expect_reply"] and "родител" in r["reply"]
@@ -160,4 +160,4 @@ def test_onboarding_can_be_closed():
         assert ob.start("d12", kid("давай познакомимся"), p.id)["expect_reply"]
         profiles.store.delete(p.id)
     finally:
-        ob.policy.set_onboarding(True)
+        ob.policy.set_setting("onboarding_enabled", True)

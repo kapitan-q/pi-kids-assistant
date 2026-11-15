@@ -23,37 +23,53 @@ schedule:
   - {mode: normal}
 """, "utf-8")
 os.environ["POLICY_FILE"] = str(CONFIG)
-os.environ["STATE_FILE"] = str(TMP / "state.json")
+os.environ["STATE_FILE"] = str(TMP / "state" / "state.json")
 os.environ["CORE_DATA_DIR"] = str(TMP / "core")
+os.environ["CORE_DB"] = str(TMP / "core" / "speaker.db")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import db  # noqa: E402
 import policy  # noqa: E402
 import profiles  # noqa: E402
+import rights  # noqa: E402
+
+BOOKS_TAGS = rights.Right("books.tags", "Теги книг", kind="values", module="books", applies_to="tags")
+rights._module_rights["books"] = [BOOKS_TAGS]     # как будто модуль объявил
+rights._fetched_at = 10 ** 12                      # не ходить в модули
 
 
-def _seed():
+def seed():
     """Роли и люди как на titan: Гость, Админ, Дети (сказки); Папа — админ, Старший и Младший — дети."""
-    profiles.roles.update(profiles.GUEST, allow_modules=["books"])
-    with profiles.roles.lock:
-        profiles.roles.items["child"] = profiles.Role(id="child", title="Дети", allow_modules=["books"])
-        profiles.roles._save()
-    with profiles.store.lock:
-        profiles.store._load()
-        for p in (profiles.Profile(id="dad", name="Папа", roles=["admin"], created_at=1),
-                  profiles.Profile(id="older", name="Старший", roles=["child"], age=9, aliases=["старш"], created_at=2),
-                  profiles.Profile(id="younger", name="Младший", roles=["child"], age=7, aliases=["младш"],
-                                   created_at=3)):
-            profiles.store.items[p.id] = p
-        profiles.store._save()
+    db.ex("DELETE FROM user")
+    db.ex("DELETE FROM role WHERE id != 'guest'")
+    profiles.roles.update("guest", allow={"books": []}, deny={})
+    for rid, title, allow in (("admin", "Админ", {"books": [], rights.CONTROL: [], rights.MODES_EXEMPT: []}),
+                              ("child", "Дети", {"books": []})):
+        db.ex("INSERT INTO role(id, title, created_at) VALUES(?, ?, 1)", (rid, title))
+        profiles.roles.update(rid, allow=allow)
+    for uid, name, roles, age, aliases in (("dad", "Папа", ["admin"], None, []),
+                                           ("older", "Старший", ["child"], 9, ["старш"]),
+                                           ("younger", "Младший", ["child"], 7, ["младш"])):
+        db.ex("INSERT INTO user(id, name, birth_date, aliases, created_at) VALUES(?, ?, ?, ?, ?)",
+              (uid, name, db.birth_from_age(age), f'{aliases}'.replace("'", '"'), len(uid)))
+        profiles.store.update(uid, roles=roles)
 
 
-_seed()
+seed()
 
 
 @pytest.fixture(autouse=True)
 def clean_state():
-    policy.state.data = {"overrides": [], "announced": {}, "budgets": {}}
+    db.ex("DELETE FROM override")
+    db.ex("DELETE FROM mark")
+    db.ex("DELETE FROM setting")
     yield
+
+
+@pytest.fixture
+def reseed():
+    yield
+    seed()
 
 
 @pytest.fixture

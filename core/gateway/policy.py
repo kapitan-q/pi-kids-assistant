@@ -1,12 +1,13 @@
-"""Режимы, расписание, роли и доступы, временные команды родителя и лимиты для Pi.
+"""Режимы, расписание, права говорящего, временные команды родителя и лимиты для Pi.
 
-Приоритет: временная команда родителя > расписание > default.
-Состояние (команды, «уже предупредили», бюджеты ночных сказок) — в JSON-файле.
+Приоритет режима: временная команда > расписание > default_mode.
+Режимы (config/speaker.yaml) — «когда и для кого»; права (rights.py, роли в /admin) — «что можно».
+Тот, у кого есть право core.modes_exempt, режимам не подчиняется.
+Временные команды, отметки «уже предупредили» и бюджеты ночных сказок — в БД (db.py).
 """
 import json
 import logging
 import os
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,15 +17,18 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+import db
 import lang
+import modules
 import profiles
+import rights
 
 log = logging.getLogger("policy")
 
 CONFIG_PATH = Path(os.getenv("POLICY_FILE", "/config/speaker.yaml"))
-STATE_PATH = Path(os.getenv("STATE_FILE", "/data/state/state.json"))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DEFAULT_CONFIG = {"modes": {"normal": {}}, "schedule": [{"mode": "normal"}]}
+MARK_TTL_SEC = 2 * 86400
 
 
 # ---------- конфиг с горячей перезагрузкой ----------
@@ -59,98 +63,99 @@ def now() -> datetime:
     return datetime.now(tz())
 
 
+def default_mode() -> str:
+    return config().get("default_mode", "normal")
+
+
 def mode_conf(name: str) -> dict:
     return (config().get("modes") or {}).get(name, {})
 
 
+# ---------- кто говорит и что ему можно ----------
+
+def user(speaker: str | None) -> profiles.User | None:
+    return profiles.store.get(speaker)
+
+
 def profile(speaker: str | None) -> dict:
-    """Профиль говорящего ({} — не узнан или нет такого)."""
-    p = profiles.store.get(speaker)
-    return p.model_dump() if p else {}
+    """Пользователь как dict ({} — не узнан или нет такого): name, age, aliases, roles…"""
+    u = user(speaker)
+    return u.view() if u else {}
 
 
 def role_ids(speaker: str | None) -> list[str]:
-    """Роли говорящего (существующие); нет ролей или голос не узнан — гость."""
-    p = profiles.store.get(speaker)
-    ids = [r for r in (p.roles if p else []) if r != profiles.GUEST and profiles.roles.get(r)]
+    """Роли говорящего; нет ролей или голос не узнан — [guest]."""
+    u = user(speaker)
+    ids = [r for r in (u.roles if u else []) if r != profiles.GUEST]
     return ids or [profiles.GUEST]
 
 
-def role_list(speaker: str | None) -> list[profiles.Role]:
-    return [profiles.roles.get(r) for r in role_ids(speaker)]
-
-
-def can_control(speaker: str | None) -> bool:
-    """Может устанавливать и снимать ограничения (флаг control у какой-нибудь из ролей)."""
-    return bool(speaker) and any(r.control for r in role_list(speaker))
-
-
-def children() -> list[str]:
-    """id профилей, на которых действуют ограничения (все, кроме тех, кто ими управляет)."""
-    return [p.id for p in profiles.store.all() if not can_control(p.id)]
-
-
 def unverified(speaker: str | None) -> bool:
-    """Личность не подтверждена родителем: голос не узнан или у профиля нет ролей
-    (только что познакомился — ребёнок мог представиться чужим именем)."""
+    """Личность не подтверждена родителем: голос не узнан или ролей нет (мог назваться чужим именем)."""
     return role_ids(speaker) == [profiles.GUEST]
 
 
+def grants(speaker: str | None) -> rights.Grants:
+    roles = [r for r in map(profiles.roles.get, role_ids(speaker)) if r]
+    u = user(speaker)
+    g = rights.effective([{"allow": r.allow, "deny": r.deny} for r in roles], u.age if u else None)
+    if unverified(speaker):
+        g.flags -= rights.GUEST_FORBIDDEN
+    return g
+
+
+def can_control(speaker: str | None) -> bool:
+    """Может ставить и снимать ограничения голосом (право core.control)."""
+    return bool(speaker) and grants(speaker).has(rights.CONTROL)
+
+
+def modes_exempt(speaker: str | None) -> bool:
+    return bool(speaker) and not unverified(speaker) and grants(speaker).has(rights.MODES_EXEMPT)
+
+
+def targets() -> list[str]:
+    """id пользователей, на которых действуют режимы (все, кроме имеющих core.modes_exempt)."""
+    return [u.id for u in profiles.store.all() if not modes_exempt(u.id)]
+
+
+def guest_enabled() -> bool:
+    """Гостевой доступ: неузнанный голос и люди без ролей пользуются правами роли «Гость».
+    Выключен — колонка им отвечает «не узнала» (кроме команд плееру и знакомства)."""
+    return bool(db.setting("guest_enabled", True))
+
+
+def onboarding_enabled() -> bool:
+    """Можно ли знакомиться с колонкой (новые пользователи). Переключается в /admin."""
+    return bool(db.setting("onboarding_enabled", True))
+
+
+def set_setting(key: str, value: bool) -> None:
+    db.set_setting(key, bool(value))
+
+
 def speaker_matches(who: list | None, speaker: str | None, mode: str | None = None) -> bool:
-    """who в правилах и командах — id профилей и/или ролей (who: [deti]).
+    """who в правилах и командах — id пользователей и/или ролей.
     Неподтверждённого говорящего (unknown_speaker_matches) касаются все ограничения с who —
-    но не послабления: «обычный режим для старшего» на новичка не распространяется."""
+    но не послабления: «обычный режим для старшего» на неузнанного не распространяется."""
     if not who:
         return True
     if (speaker is not None and speaker in who) or set(role_ids(speaker)) & set(who):
         return True
-    if not unverified(speaker) or mode == config().get("default_mode", "normal"):
+    if not unverified(speaker) or mode == default_mode():
         return False
     return bool(config().get("unknown_speaker_matches", True))
 
 
-def access(speaker: str | None) -> dict:
-    """Что можно говорящему по его ролям: модули, которые разрешает хоть одна роль, минус те,
-    что запрещает любая; запрещённые теги — от всех ролей.
-    {"modules": [..] | None (любые), "tags_deny": set, "age": int | None}"""
-    age = profile(speaker).get("age")
-    rs = role_list(speaker)
-    deny_mods = {m for r in rs for m in r.deny_modules}
-    allowed = []
-    for r in rs:
-        allowed += [m for m in r.allow_modules if m not in deny_mods and m not in allowed]
-    deny = {t.lower() for r in rs for t in r.deny_tags}
-    return {"modules": allowed, "tags_deny": deny, "age": age}
+# ---------- временные команды (БД) ----------
 
-
-# ---------- состояние ----------
-
-class State:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.data = {"overrides": [], "announced": {}, "budgets": {}}
-        if path.exists():
-            try:
-                self.data.update(json.loads(path.read_text("utf-8")))
-            except json.JSONDecodeError:
-                log.exception("state.json повреждён — начинаю с чистого")
-
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), "utf-8")
-        tmp.replace(self.path)
-
-    def prune(self) -> None:
-        """Убираем истёкшие команды и старые отметки (старше двух суток)."""
-        ts = time.time()
-        self.data["overrides"] = [o for o in self.data["overrides"] if o["until_ts"] > ts]
-        for key in ("announced", "budgets"):
-            self.data[key] = {k: v for k, v in self.data[key].items() if ts - v < 2 * 86400}
-
-
-state = State(STATE_PATH)
+def overrides() -> list[dict]:
+    ts = time.time()
+    db.ex("DELETE FROM override WHERE until_ts <= ?", (ts,))
+    db.mark_prune(MARK_TTL_SEC)
+    rows = db.q("SELECT * FROM override ORDER BY created_at")
+    return [{"id": r["id"], "mode": r["mode"], "until_ts": r["until_ts"],
+             "until": datetime.fromtimestamp(r["until_ts"], tz()).isoformat(timespec="minutes"),
+             "who": json.loads(r["who"]) if r["who"] else None} for r in rows]
 
 
 # ---------- расписание ----------
@@ -203,6 +208,11 @@ def rule_window(rule: dict, t: datetime) -> tuple[datetime, datetime] | None:
     return None
 
 
+def schedule_refs() -> set[str]:
+    """id людей и ролей, на которые ссылается расписание (нельзя удалить/объединить молча)."""
+    return {w for rule in config().get("schedule") or [] for w in rule.get("who") or []}
+
+
 # ---------- итоговый режим ----------
 
 @dataclass
@@ -211,28 +221,28 @@ class Resolved:
     conf: dict
     key: str                # уникален для «экземпляра» режима: одна ночь, одна команда
     until: datetime | None
-    source: str             # override | schedule | default
+    source: str             # override | schedule | default | exempt
 
 
 def resolve(speaker: str | None, t: datetime | None = None) -> Resolved:
+    name = default_mode()
+    if modes_exempt(speaker):
+        return Resolved(name, mode_conf(name), f"def:{name}", None, "exempt")
     t = t or now()
-    with state.lock:
-        state.prune()
-        overrides = list(state.data["overrides"])
-    for ov in reversed(overrides):  # последняя команда главнее
+    for ov in reversed(overrides()):  # последняя команда главнее
         if speaker_matches(ov.get("who"), speaker, ov["mode"]):
             until = datetime.fromtimestamp(ov["until_ts"], tz())
             return Resolved(ov["mode"], mode_conf(ov["mode"]), f"ov:{ov['id']}", until, "override")
     for i, rule in enumerate(config().get("schedule") or []):
         win = rule_window(rule, t)
         if win and speaker_matches(rule.get("who"), speaker, rule.get("mode", "normal")):
-            name = rule.get("mode", "normal")
-            return Resolved(name, mode_conf(name), f"sch:{i}:{win[0]:%Y%m%d%H%M}", win[1], "schedule")
-    name = config().get("default_mode", "normal")
+            mode = rule.get("mode", "normal")
+            return Resolved(mode, mode_conf(mode), f"sch:{i}:{win[0]:%Y%m%d%H%M}", win[1], "schedule")
     return Resolved(name, mode_conf(name), f"def:{name}", None, "default")
 
 
 def children_allowed(res: Resolved) -> bool:
+    """Режим разрешает отвечать и включать (поле режима allow_children: «тем, на кого действуют режимы»)."""
     return bool(res.conf.get("allow_children", True))
 
 
@@ -243,30 +253,20 @@ def budget_remaining_sec(res: Resolved) -> int | None:
     budget_min = res.conf.get("play_budget_min")
     if not budget_min:
         return None
-    with state.lock:
-        started = state.data["budgets"].get(res.key)
+    started = db.mark_get("budgets", res.key)
     if started is None:
         return int(budget_min * 60)
     return max(0, int(budget_min * 60 - (time.time() - started)))
 
 
 def start_budget(res: Resolved) -> None:
-    if not res.conf.get("play_budget_min"):
-        return
-    with state.lock:
-        if res.key not in state.data["budgets"]:
-            state.data["budgets"][res.key] = time.time()
-            state.save()
+    if res.conf.get("play_budget_min"):
+        db.mark_set_once("budgets", res.key)
 
 
 def announce_once(res: Resolved) -> bool:
     """True — если про этот режим ещё не предупреждали (и отмечаем)."""
-    with state.lock:
-        if res.key in state.data["announced"]:
-            return False
-        state.data["announced"][res.key] = time.time()
-        state.save()
-        return True
+    return db.mark_set_once("announced", res.key)
 
 
 def limits(res: Resolved) -> dict:
@@ -280,19 +280,20 @@ def limits(res: Resolved) -> dict:
     }
 
 
-def agent_context(res: Resolved, speaker: str | None, modules: dict[str, str] | None = None) -> str | None:
+def agent_context(res: Resolved, speaker: str | None, available: dict[str, str] | None = None) -> str | None:
     """Служебная пометка для агента: кто говорит, режим, что доступно.
-    modules — {имя: название} модулей, доступных говорящему сейчас."""
+    available — {имя: название} модулей, доступных говорящему сейчас."""
     parts = []
     p = profile(speaker)
     if p:
-        name = p.get("name", speaker)
-        parts.append(lang.t("context_speaker_age", name=name, age=p["age"]) if p.get("age")
-                     else lang.t("context_speaker", name=name))
+        parts.append(lang.t("context_speaker_age", name=p["name"], age=p["age"]) if p.get("age")
+                     else lang.t("context_speaker", name=p["name"]))
+    else:
+        parts.append(lang.t("context_unknown"))
     if res.conf.get("prompt"):
         parts.append(res.conf["prompt"])
-    if modules is not None:
-        parts.append(lang.t("context_modules", modules=", ".join(modules.values()) or "—"))
+    if available is not None:
+        parts.append(lang.t("context_modules", modules=", ".join(available.values()) or "—"))
     if res.conf.get("tags"):
         parts.append(lang.t("context_tags", tags=", ".join(res.conf["tags"])))
     remaining = budget_remaining_sec(res)
@@ -303,46 +304,43 @@ def agent_context(res: Resolved, speaker: str | None, modules: dict[str, str] | 
 
 # ---------- команды родителя ----------
 
-def add_override(mode: str, until: datetime, who: list[str] | None = None) -> dict:
-    ov = {"id": uuid.uuid4().hex[:8], "mode": mode, "until_ts": until.timestamp(),
-          "until": until.isoformat(timespec="minutes"), "who": who or None}
-    with state.lock:
-        state.data["overrides"].append(ov)
-        state.prune()
-        state.save()
-    return ov
+def add_override(mode: str, until: datetime, who: list[str] | None = None,
+                 via: str = "api", actor: str | None = None) -> dict:
+    oid = uuid.uuid4().hex[:8]
+    db.ex("INSERT INTO override(id, mode, until_ts, who, created_at) VALUES(?, ?, ?, ?, ?)",
+          (oid, mode, until.timestamp(), json.dumps(who, ensure_ascii=False) if who else None, time.time()))
+    db.audit(via, "mode_on", actor, mode=mode, until=until.isoformat(timespec="minutes"), who=who)
+    return next((o for o in overrides() if o["id"] == oid), {"id": oid, "mode": mode})
 
 
 def clear_overrides(who: list[str] | None = None) -> int:
-    with state.lock:
-        before = len(state.data["overrides"])
-        if who:
-            state.data["overrides"] = [o for o in state.data["overrides"]
-                                       if not o.get("who") or not set(o["who"]) & set(who)]
-        else:
-            state.data["overrides"] = []
-        state.save()
-        return before - len(state.data["overrides"])
+    rows = overrides()
+    gone = [o["id"] for o in rows if not who or not o.get("who") or set(o["who"]) & set(who)]
+    for oid in gone:
+        db.ex("DELETE FROM override WHERE id=?", (oid,))
+    return len(gone)
 
 
-def relax(who: list[str] | None = None) -> int:
+def relax(who: list[str] | None = None, via: str = "api", actor: str | None = None) -> int:
     """Вернуть обычный режим: снять временные команды, а если режим всё ещё задаёт
     расписание (ночь, уроки) — перекрыть его командой default_mode до конца окна.
-    Возвращает число снятых команд."""
+    who — id людей (и ролей: тогда для всех её людей). Возвращает число снятых команд."""
     removed = clear_overrides(who)
-    default = config().get("default_mode", "normal")
+    default = default_mode()
+    db.audit(via, "mode_off", actor, who=who, removed=removed)
     if who:
-        for sp in who:
+        people = [w for w in who if profiles.store.get(w)]
+        people += [u for w in who if profiles.roles.get(w) for u in profiles.roles.users_of(w)]
+        for sp in dict.fromkeys(people):
             res = resolve(sp)
             if res.source == "schedule" and res.mode != default and res.until:
-                add_override(default, res.until, [sp])
+                add_override(default, res.until, [sp], via, actor)
         return removed
-    # для всех: проверяем неизвестного говорящего и каждого ребёнка
-    speakers = [None] + children()
-    untils = [r.until for r in map(resolve, speakers)
+    # для всех: проверяем неизвестного говорящего и каждого, на кого действуют режимы
+    untils = [r.until for r in map(resolve, [None, *targets()])
               if r.source == "schedule" and r.mode != default and r.until]
     if untils:
-        add_override(default, max(untils), None)
+        add_override(default, max(untils), None, via, actor)
     return removed
 
 
@@ -352,74 +350,68 @@ def mode_modules(res: Resolved) -> list[str] | None:
     return list(mods) if mods is not None else None
 
 
-def allowed_modules(res: Resolved, acc: dict | None) -> list[str] | None:
-    """Режим ∩ доступ говорящего (None — любые)."""
+def allowed_modules(res: Resolved, g: rights.Grants | None) -> list[str] | None:
+    """Режим ∩ права говорящего (None — любые)."""
     out = mode_modules(res)
-    mods = (acc or {}).get("modules")
-    if mods is not None:
-        out = [m for m in mods if out is None or m in out]
+    if g is not None:
+        out = [m for m in g.modules() if out is None or m in out]
     return out
 
 
-def check_playback(res: Resolved, item: dict | None, acc: dict | None = None, modes: bool = True) -> str | None:
+def check_playback(res: Resolved, item: dict | None, g: rights.Grants | None = None) -> str | None:
     """Можно ли сейчас включить/продолжить item = {"source", "tags": [..] | None, "age_min"}.
-    acc — access(speaker): модули, запрещённые теги, возраст (по ролям — проверяется всегда).
-    modes=False — режим не проверять (говорящий сам управляет ограничениями).
+    res — режим для говорящего (у кого core.modes_exempt — default); g — его права.
     item=None — ничего не играет (продолжать нечего, проверяем только режим и бюджет).
-    tags=None — что играет, известно, а теги узнать не удалось: если режим требует теги — нельзя.
+    tags=None — что играет, известно, а теги узнать не удалось: если режим/права требуют теги — нельзя.
     None — можно; иначе фраза, которую сказать ребёнку."""
-    acc = acc or {}
-    if modes and not children_allowed(res):
+    if not children_allowed(res):
         return res.conf.get("message") or lang.t("blocked_default")
     if item is not None:
-        mods = allowed_modules(res, acc) if modes else acc.get("modules")
+        mods = allowed_modules(res, g)
         if mods is not None and item.get("source") not in mods:
             return res.conf.get("modules_message") or lang.t("module_denied")
-    remaining = budget_remaining_sec(res) if modes else None
+    remaining = budget_remaining_sec(res)
     if remaining is not None and remaining <= 0:
         return res.conf.get("budget_message") or lang.t("budget_default")
     if item is None:
         return None
-    allowed_tags = {t.lower() for t in res.conf.get("tags") or []} if modes else set()
+    allowed_tags = {t.lower() for t in res.conf.get("tags") or []}
     tags = item.get("tags")
     if allowed_tags and (tags is None or not allowed_tags & {t.lower() for t in tags}):
         return res.conf.get("tags_message") or lang.t("tags_default")
-    if acc.get("tags_deny") and tags is not None and acc["tags_deny"] & {t.lower() for t in tags}:
+    if g is not None and g.item_denied(item.get("source") or "", item):
         return lang.t("tags_default")
-    if acc.get("age") is not None and (item.get("age_min") or 0) > acc["age"]:
+    if g is not None and g.age is not None and (item.get("age_min") or 0) > g.age:
         return lang.t("age_denied")
     return None
 
 
-def onboarding_enabled() -> bool:
-    """Можно ли знакомиться с колонкой (новые профили). Переключается в /admin, хранится в state.json."""
-    with state.lock:
-        return bool(state.data.get("onboarding_enabled", True))
-
-
-def set_onboarding(enabled: bool) -> None:
-    with state.lock:
-        state.data["onboarding_enabled"] = bool(enabled)
-        state.save()
+def modes_list() -> list[dict]:
+    """Режимы, которые можно включить (для админки): все, кроме default_mode."""
+    return [{"id": k, "title": v.get("title", k), "default_minutes": v.get("default_minutes", 60)}
+            for k, v in (config().get("modes") or {}).items() if k != default_mode()]
 
 
 def overview() -> dict:
-    """Что действует сейчас: на неузнанный голос и на каждый не родительский профиль (для /admin)."""
-    default = config().get("default_mode", "normal")
-    people = [(None, None)] + [(pid, profile(pid).get("name", pid)) for pid in children()]
+    """Что действует сейчас: на неузнанный голос и на каждого, на кого действуют режимы (для /admin)."""
+    default = default_mode()
+    people = [(None, None)] + [(uid, profile(uid).get("name", uid)) for uid in targets()]
     rows = []
-    for pid, name in people:
-        r = resolve(pid)
-        rows.append({"id": pid, "name": name, "mode": r.mode, "title": r.conf.get("title", r.mode),
+    for uid, name in people:
+        r = resolve(uid)
+        rows.append({"id": uid, "name": name, "mode": r.mode, "title": r.conf.get("title", r.mode),
                      "until": r.until.isoformat(timespec="minutes") if r.until else None,
                      "source": r.source, "restricted": r.mode != default})
     return {"now": now().isoformat(timespec="minutes"), "default_mode": default, "people": rows,
-            "onboarding_enabled": onboarding_enabled()}
+            "modes": modes_list(), "onboarding_enabled": onboarding_enabled(),
+            "guest_enabled": guest_enabled()}
 
 
 def status() -> dict:
-    with state.lock:
-        state.prune()
-        overrides = list(state.data["overrides"])
-    return {"now": now().isoformat(timespec="minutes"), "overrides": overrides,
+    return {"now": now().isoformat(timespec="minutes"), "overrides": overrides(),
             "unknown_speaker": limits(resolve(None))}
+
+
+def available_titles(res: Resolved, speaker: str | None) -> dict[str, str]:
+    """{модуль: название}, которые говорящему можно сейчас: его права ∩ режим."""
+    return modules.titles(allowed_modules(res, grants(speaker)))

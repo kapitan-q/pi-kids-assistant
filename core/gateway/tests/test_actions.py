@@ -41,7 +41,7 @@ def test_to_pi_builds_url_and_legacy_id():
 
 def run(action, device="d1", playing=(None, None), speaker=None):
     res = policy.resolve(speaker)
-    return asyncio.run(app.enforce(action, "ok", res, policy.limits(res), device, playing, speaker, False))
+    return asyncio.run(app.enforce(action, "ok", res, policy.limits(res), device, playing, speaker))
 
 
 def test_enforce_night_tags(at):

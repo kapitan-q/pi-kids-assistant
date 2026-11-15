@@ -1,13 +1,14 @@
-"""Мини-админка /admin: что действует сейчас (и снять), роли (что можно) и люди (какие у них роли).
+"""Мини-админка /admin: что действует сейчас (включить и снять режим), роли (права) и люди.
 
 Вход — basic-auth родителя (ADMIN_USER + bcrypt ADMIN_PASSWORD_HASH), проверяет сам шлюз:
 так одинаково за Traefik и в режиме «дома». Пароль колонки сюда не подходит.
-Профили создаются только знакомством голосом с колонки.
+Люди появляются только знакомством голосом с колонки.
 """
 import base64
 import hmac
 import logging
 import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import bcrypt
@@ -15,9 +16,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+import db
 import modules
 import policy
 import profiles
+import rights
 import voices
 
 log = logging.getLogger("admin")
@@ -60,11 +63,10 @@ def check_parent(authorization: str | None = Header(default=None)) -> None:
 router = APIRouter(prefix="/admin", dependencies=[Depends(check_parent)])
 
 
-class ProfilePatch(BaseModel):
+class UserPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=40)
     roles: list[str] | None = None
-    age: int | None = Field(default=None, ge=1, le=120)
-    clear_age: bool = False
+    birth_date: str | None = None          # YYYY-MM-DD; "" — убрать
     aliases: list[str] | None = None
 
 
@@ -78,26 +80,34 @@ class RoleIn(BaseModel):
 
 class RolePatch(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=40)
-    allow_modules: list[str] | None = None
-    deny_modules: list[str] | None = None
-    deny_tags: list[str] | None = None
-    control: bool | None = None       # может устанавливать и снимать ограничения
+    allow: dict[str, list[str]] | None = None     # право -> значения (для flag — [])
+    deny: dict[str, list[str]] | None = None
 
 
-def _view(p: profiles.Profile) -> dict:
-    d = p.model_dump()
-    acc = policy.access(p.id)
-    d["can_control"] = policy.can_control(p.id)
-    d["unverified"] = policy.unverified(p.id)
-    d["effective"] = {"modules": acc["modules"], "deny_tags": sorted(acc["tags_deny"])}
-    return d
+class RelaxIn(BaseModel):
+    who: list[str] | None = None      # None — снять для всех (и для неузнанного голоса)
+
+
+class OverrideIn(BaseModel):
+    mode: str
+    minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    until: str | None = None          # "HH:MM" — до ближайшего такого времени
+    who: list[str] | None = None
+
+
+class SettingsIn(BaseModel):
+    onboarding_enabled: bool | None = None
+    guest_enabled: bool | None = None
+
+
+def _user_view(u: profiles.User) -> dict:
+    g = policy.grants(u.id)
+    return {**u.view(), "unverified": policy.unverified(u.id),
+            "effective": {"flags": sorted(g.flags), "values": g.values, "age": g.age}}
 
 
 def _role_view(r: profiles.Role) -> dict:
-    d = r.model_dump()
-    d["builtin"] = r.id in profiles.BUILTIN
-    d["used_by"] = [p.id for p in profiles.store.all() if r.id in p.roles]
-    return d
+    return {**r.model_dump(), "builtin": r.builtin, "used_by": profiles.roles.users_of(r.id)}
 
 
 def _clean(items: list[str], lower: bool = False) -> list[str]:
@@ -109,9 +119,24 @@ def _clean(items: list[str], lower: bool = False) -> list[str]:
     return out
 
 
-def _schedule_refs(role_id: str) -> bool:
-    cfg = policy.config()
-    return any(role_id in (rule.get("who") or []) for rule in cfg.get("schedule") or [])
+def _check_rights(rid: str, rights_map: dict[str, list[str]], effect: str) -> dict[str, list[str]]:
+    known = rights.by_id()
+    out = {}
+    for right, vals in rights_map.items():
+        r = known.get(right)
+        if not r:
+            raise HTTPException(400, f"нет права {right}")
+        if rid == profiles.GUEST and effect == "allow" and right in rights.GUEST_FORBIDDEN:
+            raise HTTPException(400, "гостю нельзя управлять ограничениями — голос не узнан")
+        out[right] = _clean(vals, lower=True) if r.kind == "values" else []
+    return out
+
+
+def _schedule_block(ids: list[str]) -> None:
+    used = sorted(set(ids) & policy.schedule_refs())
+    if used:
+        raise HTTPException(409, f"на {', '.join(used)} ссылается расписание (config/speaker.yaml) — "
+                                 "сначала поправьте его")
 
 
 @router.get("")
@@ -120,59 +145,84 @@ def page():
     return FileResponse(PAGE, media_type="text/html")
 
 
-@router.get("/api/profiles")
-def list_profiles():
+@router.get("/api/state")
+async def state():
+    await rights.refresh()
     return {
-        "profiles": [_view(p) for p in profiles.store.all()],
+        "users": [_user_view(u) for u in profiles.store.all()],
         "roles": [_role_view(r) for r in profiles.roles.all()],
+        "rights": [r.view() for r in rights.catalog()],
         "modules": modules.titles(),
+        "control": policy.overview(),
     }
 
 
-@router.patch("/api/profiles/{pid}")
-def patch_profile(pid: str, body: ProfilePatch):
-    if not profiles.store.get(pid):
+@router.patch("/api/users/{uid}")
+def patch_user(uid: str, body: UserPatch):
+    if not profiles.store.get(uid):
         raise HTTPException(404)
-    fields = body.model_dump(exclude_none=True, exclude={"clear_age"})
+    fields = body.model_dump(exclude_none=True)
     if "roles" in fields:
         fields["roles"] = [r for r in _clean(fields["roles"]) if r != profiles.GUEST]
         unknown = [r for r in fields["roles"] if not profiles.roles.get(r)]
         if unknown:
             raise HTTPException(400, f"нет ролей {unknown}")
-    if body.clear_age:
-        fields["age"] = None
+    if "birth_date" in fields:
+        if fields["birth_date"]:
+            try:
+                d = date.fromisoformat(fields["birth_date"])
+            except ValueError as e:
+                raise HTTPException(400, "дата рождения — ГГГГ-ММ-ДД") from e
+            if not date(1900, 1, 1) <= d <= date.today():
+                raise HTTPException(400, "странная дата рождения")
+        else:
+            fields["birth_date"] = None
     if "aliases" in fields:
         fields["aliases"] = _clean(fields["aliases"], lower=True)
-    p = profiles.store.update(pid, **fields)
-    log.info("профиль %s изменён: %s", pid, fields)
-    return _view(p)
+    u = profiles.store.update(uid, **fields)
+    db.audit("admin", "user_changed", uid, **fields)
+    return _user_view(u)
+
+
+@router.post("/api/users/{uid}/merge")
+def merge(uid: str, body: MergeIn):
+    """Голос uid переносится в пользователя into (знакомство → существующий человек), uid удаляется."""
+    src, dst = profiles.store.get(uid), profiles.store.get(body.into)
+    if not src or not dst or uid == body.into:
+        raise HTTPException(400, "нужны два разных существующих пользователя")
+    _schedule_block([uid])
+    samples = voices.store.move(uid, body.into)
+    u = profiles.store.merge(uid, body.into, samples, src.voice.updated_at or dst.voice.updated_at)
+    db.audit("admin", "user_merged", uid, into=body.into, samples=samples)
+    return _user_view(u)
+
+
+@router.delete("/api/users/{uid}")
+def delete_user(uid: str):
+    if not profiles.store.get(uid):
+        raise HTTPException(404)
+    _schedule_block([uid])
+    profiles.store.delete(uid)
+    voices.store.delete(uid)
+    db.audit("admin", "user_deleted", uid)
+    return {"ok": True}
 
 
 @router.post("/api/roles")
 def create_role(body: RoleIn):
     r = profiles.roles.create(body.title)
-    log.info("роль %s создана", r.id)
+    db.audit("admin", "role_created", r.id, title=r.title)
     return _role_view(r)
 
 
 @router.patch("/api/roles/{rid}")
 def patch_role(rid: str, body: RolePatch):
-    r = profiles.roles.get(rid)
-    if not r:
+    if not profiles.roles.get(rid):
         raise HTTPException(404)
-    fields = body.model_dump(exclude_none=True)
-    if rid == profiles.GUEST and fields.get("control"):
-        raise HTTPException(400, "гостю нельзя управлять ограничениями — голос не узнан")
-    for key in ("allow_modules", "deny_modules"):
-        if key in fields:
-            fields[key] = _clean(fields[key])
-            unknown = set(fields[key]) - set(modules.enabled())
-            if unknown:
-                raise HTTPException(400, f"нет модулей {sorted(unknown)}")
-    if "deny_tags" in fields:
-        fields["deny_tags"] = _clean(fields["deny_tags"])
-    r = profiles.roles.update(rid, **fields)
-    log.info("роль %s изменена: %s", rid, fields)
+    allow = _check_rights(rid, body.allow, "allow") if body.allow is not None else None
+    deny = _check_rights(rid, body.deny, "deny") if body.deny is not None else None
+    r = profiles.roles.update(rid, title=body.title, allow=allow, deny=deny)
+    db.audit("admin", "role_changed", rid, title=body.title, allow=allow, deny=deny)
     return _role_view(r)
 
 
@@ -182,42 +232,17 @@ def delete_role(rid: str):
         raise HTTPException(400, "встроенную роль удалить нельзя")
     if not profiles.roles.get(rid):
         raise HTTPException(404)
-    if _schedule_refs(rid):
-        raise HTTPException(409, "роль используется в расписании (config/speaker.yaml) — сначала уберите её оттуда")
-    for p in profiles.store.all():
-        if rid in p.roles:
-            profiles.store.update(p.id, roles=[x for x in p.roles if x != rid])
+    _schedule_block([rid])
     profiles.roles.delete(rid)
-    log.info("роль %s удалена", rid)
+    db.audit("admin", "role_deleted", rid)
     return {"ok": True}
-
-
-@router.post("/api/profiles/{pid}/merge")
-def merge(pid: str, body: MergeIn):
-    """Голос профиля pid переносится в профиль into (например, «Маша» из знакомства → «Старший»), pid удаляется."""
-    src, dst = profiles.store.get(pid), profiles.store.get(body.into)
-    if not src or not dst or pid == body.into:
-        raise HTTPException(400, "нужны два разных существующих профиля")
-    samples = voices.store.move(pid, body.into)
-    profiles.store.update(body.into, voice={"samples": samples, "updated_at": src.voice.updated_at},
-                          last_seen=max(src.last_seen or 0, dst.last_seen or 0) or None)
-    profiles.store.delete(pid)
-    log.info("профиль %s объединён с %s (%d образцов)", pid, body.into, samples)
-    return _view(profiles.store.get(body.into))
-
-
-class RelaxIn(BaseModel):
-    who: list[str] | None = None      # None — снять для всех (и для неузнанного голоса)
-
-
-class SettingsIn(BaseModel):
-    onboarding_enabled: bool
 
 
 @router.post("/api/settings")
 def settings(body: SettingsIn):
-    policy.set_onboarding(body.onboarding_enabled)
-    log.info("новые знакомства %s из админки", "разрешены" if body.onboarding_enabled else "запрещены")
+    for key, value in body.model_dump(exclude_none=True).items():
+        policy.set_setting(key, value)
+        db.audit("admin", "setting", None, **{key: value})
     return policy.overview()
 
 
@@ -226,20 +251,38 @@ def control():
     return policy.overview()
 
 
-@router.post("/api/control/relax")
-def relax(body: RelaxIn):
-    """Вернуть обычный режим (в т.ч. поверх расписания до конца окна) — когда голос родителя не узнан."""
-    if body.who and not all(profiles.store.get(pid) for pid in body.who):
-        raise HTTPException(400, "нет такого профиля")
-    removed = policy.relax(body.who or None)
-    log.info("ограничения сняты из админки: %s (команд снято: %d)", body.who or "все", removed)
+@router.post("/api/control/override")
+def override(body: OverrideIn):
+    """Включить режим из админки: на сколько минут или до какого времени, для кого (люди и роли)."""
+    if body.mode not in {m["id"] for m in policy.modes_list()}:
+        raise HTTPException(400, f"нет режима {body.mode}")
+    who = _clean(body.who or []) or None
+    if who and not all(profiles.store.get(w) or profiles.roles.get(w) for w in who):
+        raise HTTPException(400, "нет такого человека или роли")
+    now = policy.now()
+    if body.until:
+        try:
+            t = datetime.strptime(body.until, "%H:%M")
+        except ValueError as e:
+            raise HTTPException(400, "до — ЧЧ:ММ") from e
+        until = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if until <= now:
+            until += timedelta(days=1)
+    else:
+        until = now + timedelta(minutes=body.minutes or policy.mode_conf(body.mode).get("default_minutes", 60))
+    policy.add_override(body.mode, until, who, "admin")
     return policy.overview()
 
 
-@router.delete("/api/profiles/{pid}")
-def delete(pid: str):
-    if not profiles.store.delete(pid):
-        raise HTTPException(404)
-    voices.store.delete(pid)
-    log.info("профиль %s удалён вместе с голосом", pid)
-    return {"ok": True}
+@router.post("/api/control/relax")
+def relax(body: RelaxIn):
+    """Вернуть обычный режим (в т.ч. поверх расписания до конца окна) — когда голос родителя не узнан."""
+    if body.who and not all(profiles.store.get(w) or profiles.roles.get(w) for w in body.who):
+        raise HTTPException(400, "нет такого человека или роли")
+    policy.relax(body.who or None, "admin")
+    return policy.overview()
+
+
+@router.get("/api/audit")
+def audit(limit: int = 50):
+    return db.audit_tail(max(1, min(limit, 500)))

@@ -491,7 +491,9 @@ class Client:
 
     def _check_policy(self) -> None:
         try:
-            r = requests.get(f"{SERVER}/policy", headers=HEADERS, auth=AUTH, timeout=10)
+            # лимиты — для того, кто включил то, что играет (шлюз помнит по device_id)
+            r = requests.get(f"{SERVER}/policy", params={"device_id": DEVICE_ID}, headers=HEADERS,
+                             auth=AUTH, timeout=10)
             r.raise_for_status()
             self.apply_limits(r.json())
         except Exception as e:  # noqa: BLE001

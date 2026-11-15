@@ -116,3 +116,40 @@ def test_run_turn_marks_session_stale_when_module_down():
 def test_run_turn_api_error_is_not_read_aloud():
     r, _ = turn([AssistantMessage([TextBlock("Invalid API key")], model="m"), result(is_error=True)])
     assert r["reply"] == app.FALLBACK_REPLY
+
+
+MODS = {"books": {"url": "http://books:8000"}, "yt": {"url": "http://yt:8000/"}}
+
+
+def test_make_options_passes_rights_to_modules():
+    rights = {"modules": {"books": {"books.tags": {"allow": None, "deny": ["страшные"]}}}, "age": 7}
+    servers = app.make_options(MODS, rights).mcp_servers
+    assert "yt" not in servers and player.SERVER_NAME in servers           # без доступа — не подключён
+    h = servers["books"]["headers"]
+    assert json.loads(h["X-KS-Rights"]) == rights["modules"]["books"] and h["X-KS-Age"] == "7"
+    assert h["X-KS-Rights"].isascii()
+    all_servers = app.make_options(MODS).mcp_servers                     # без шлюза — все, без заголовков
+    assert {"books", "yt"} <= set(all_servers) and "headers" not in all_servers["books"]
+
+
+def test_session_restarts_when_rights_change(monkeypatch):
+    made = []
+
+    class FakeClient:
+        def __init__(self, options):
+            made.append(options)
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+    monkeypatch.setattr(app, "ClaudeSDKClient", FakeClient)
+    monkeypatch.setattr(app, "load_modules", lambda: MODS)
+    s = app.Session()
+    a = {"modules": {"books": {}}, "age": 9}
+    asyncio.run(s.ensure(a))
+    asyncio.run(s.ensure(a))
+    assert len(made) == 1
+    asyncio.run(s.ensure({"modules": {"books": {}}, "age": 7}))          # другой ребёнок — новый разговор
+    assert len(made) == 2

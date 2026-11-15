@@ -1,34 +1,33 @@
-"""Люди и роли: data/core/profiles.json и data/core/roles.json, правятся в /admin.
+"""Пользователи и роли (data/core/speaker.db, правятся в /admin).
 
-Профиль создаётся знакомством голосом («давай познакомимся») без ролей — как гость.
-Роль — набор разрешений: какие модули можно, какие модули и теги нельзя. У человека может быть
-несколько ролей: разрешено то, что разрешает хоть одна, минус всё, что запрещает любая.
-Флаг роли control — «может устанавливать и снимать ограничения»: команды режимов голосом, режимы
-его самого не блокируют. Встроенная роль одна — guest (голос не узнан или ролей нет), ей control
-нельзя. При первом запуске создаётся ещё admin (все модули + control) — обычная роль, её можно менять.
+Пользователь — имя, дата рождения (возраст считается сам), обращения для голосовых команд
+(«старший», «машенька» — целыми словами), роли. Появляется после «давай познакомимся» без ролей.
+Роль — какие права разрешены и какие запрещены (rights.py). Встроенная роль одна — «Гость»: её права
+получают неузнанный голос и пользователь без ролей; управлять ограничениями гостю нельзя.
 """
 import json
-import logging
-import os
 import re
-import threading
 import time
 import uuid
-from pathlib import Path
-from typing import Generic, TypeVar
+from datetime import date
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
-log = logging.getLogger("profiles")
-DATA_DIR = Path(os.getenv("CORE_DATA_DIR", "/data/core"))
-GUEST, ADMIN = "guest", "admin"
+import db
+
+GUEST = "guest"
 BUILTIN = (GUEST,)
-LEGACY_PARENT = "parent"                  # прежняя встроенная роль «Родитель» → admin
-LEGACY_ROLES = {"newcomer", GUEST}        # старая роль «новичок» = без ролей
 
 
 def slug(text: str) -> str:
     return re.sub(r"[^\w-]", "", text.strip().lower().replace(" ", "-"))[:20] or "x"
+
+
+def age_of(birth: str | None, today: date | None = None) -> int | None:
+    if not birth:
+        return None
+    b, t = date.fromisoformat(birth), today or date.today()
+    return t.year - b.year - ((t.month, t.day) < (b.month, b.day))
 
 
 class Voice(BaseModel):
@@ -36,193 +35,165 @@ class Voice(BaseModel):
     updated_at: float | None = None
 
 
-class Profile(BaseModel):
+class User(BaseModel):
     id: str = Field(pattern=r"^[\w-]{1,32}$")
     name: str = Field(min_length=1, max_length=40)
-    roles: list[str] = Field(default_factory=list)            # пусто — гость
-    age: int | None = Field(default=None, ge=1, le=120)
-    aliases: list[str] = Field(default_factory=list)          # как называют в командах: «старш»
+    roles: list[str] = Field(default_factory=list)
+    birth_date: str | None = None
+    aliases: list[str] = Field(default_factory=list)
     voice: Voice = Field(default_factory=Voice)
     created_at: float = Field(default_factory=time.time)
     last_seen: float | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy(cls, data):
-        """Старый формат: одна роль + личные ограничения (теперь ограничения — только в ролях)."""
-        if isinstance(data, dict) and "role" in data:
-            data = dict(data)
-            role = data.pop("role")
-            data.setdefault("roles", [] if role in LEGACY_ROLES else [role])
-            if data.pop("modules", None) is not None or data.pop("tags_deny", None):
-                log.warning("профиль %s: личные ограничения больше не поддерживаются — задайте их ролью",
-                            data.get("id"))
-        return data
+    @property
+    def age(self) -> int | None:
+        return age_of(self.birth_date)
+
+    def view(self) -> dict:
+        return {**self.model_dump(), "age": self.age}
+
+
+Profile = User   # старое имя
 
 
 class Role(BaseModel):
-    id: str = Field(pattern=r"^[\w-]{1,32}$")
-    title: str = Field(min_length=1, max_length=40)
-    control: bool = False                  # может устанавливать и снимать ограничения
-    allow_modules: list[str] = Field(default_factory=list)
-    deny_modules: list[str] = Field(default_factory=list)
-    deny_tags: list[str] = Field(default_factory=list)
-    created_at: float = Field(default_factory=time.time)
+    id: str
+    title: str
+    allow: dict[str, list[str]] = Field(default_factory=dict)   # право -> значения ([] — без списка)
+    deny: dict[str, list[str]] = Field(default_factory=dict)
+    created_at: float = 0
 
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy(cls, data):
-        if isinstance(data, dict) and "parent" in data:
-            data = dict(data)
-            data.setdefault("control", bool(data.pop("parent")))
-        return data
+    @property
+    def builtin(self) -> bool:
+        return self.id in BUILTIN
 
 
-M = TypeVar("M", bound=BaseModel)
+def _new_id(table: str, text: str) -> str:
+    s = slug(text)
+    taken = {r[0] for r in db.q(f"SELECT id FROM {table}")} | {r[0] for r in db.q(  # noqa: S608
+        "SELECT id FROM role" if table == "user" else "SELECT id FROM user")}
+    return s if s not in taken else f"{s}-{uuid.uuid4().hex[:4]}"   # id людей и ролей не пересекаются
 
 
-class JsonStore(Generic[M]):
-    """Список моделей в JSON-файле: атомарная запись, потокобезопасно."""
+# ---------- пользователи ----------
 
-    def __init__(self, path: Path, model: type[M], key: str) -> None:
-        self.path, self.model, self.key = path, model, key
-        self.lock = threading.RLock()
-        self.items: dict[str, M] = {}
-        self.loaded = False
+def _user(row) -> User:
+    roles = [r[0] for r in db.q("SELECT role_id FROM user_role WHERE user_id=? ORDER BY role_id", (row["id"],))]
+    return User(id=row["id"], name=row["name"], roles=roles, birth_date=row["birth_date"],
+                aliases=json.loads(row["aliases"] or "[]"),
+                voice=Voice(samples=row["voice_samples"], updated_at=row["voice_updated"]),
+                created_at=row["created_at"], last_seen=row["last_seen"])
 
-    def _load(self) -> None:
-        if self.loaded:
-            return
-        try:
-            raw = json.loads(self.path.read_text("utf-8"))
-            self.items = {x["id"]: self.model.model_validate(x) for x in raw.get(self.key, [])}
-        except FileNotFoundError:
-            self.items = {}
-            self.loaded = True
-            self._loaded(fresh=True)
-            return
-        except (ValueError, KeyError):
-            log.exception("%s повреждён — работаю без него (файл не трогаю)", self.path.name)
-            self.items = {}
-        self.loaded = True
-        self._loaded(fresh=False)
 
-    def _loaded(self, fresh: bool) -> None:
-        """Хук после загрузки (значения по умолчанию); fresh — файла ещё не было."""
+class UserStore:
+    def all(self) -> list[User]:
+        return [_user(r) for r in db.q("SELECT * FROM user ORDER BY created_at")]
 
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        data = {self.key: [x.model_dump() for x in self.items.values()]}
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
-        tmp.replace(self.path)
-
-    def _new_id(self, text: str) -> str:
-        s = slug(text)
-        return s if s not in self.items else f"{s}-{uuid.uuid4().hex[:4]}"
-
-    def all(self) -> list[M]:
-        with self.lock:
-            self._load()
-            return sorted(self.items.values(), key=lambda x: x.created_at)
-
-    def get(self, xid: str | None) -> M | None:
-        if not xid:
+    def get(self, uid: str | None) -> User | None:
+        if not uid:
             return None
-        with self.lock:
-            self._load()
-            return self.items.get(xid)
+        row = db.q1("SELECT * FROM user WHERE id=?", (uid,))
+        return _user(row) if row else None
 
-    def update(self, xid: str, **fields) -> M:
-        with self.lock:
-            self._load()
-            x = self.model.model_validate({**self.items[xid].model_dump(), **fields, "id": xid})
-            self.items[xid] = x
-            self._save()
-            return x
-
-    def delete(self, xid: str) -> bool:
-        with self.lock:
-            self._load()
-            if self.items.pop(xid, None) is None:
-                return False
-            self._save()
-            return True
-
-    def reload(self) -> None:
-        with self.lock:
-            self.loaded = False
-
-
-class ProfileStore(JsonStore[Profile]):
-    def by_name(self, name: str) -> Profile | None:
+    def by_name(self, name: str) -> User | None:
         n = name.strip().lower()
-        return next((p for p in self.all() if p.name.lower() == n), None)
+        return next((u for u in self.all() if u.name.lower() == n), None)
 
-    def create(self, name: str, roles: list[str] | None = None, age: int | None = None) -> Profile:
-        with self.lock:
-            self._load()
-            p = Profile(id=self._new_id(name), name=name.strip(), roles=roles or [], age=age)
-            self.items[p.id] = p
-            self._save()
-            return p
+    def create(self, name: str, roles: list[str] | None = None, age: int | None = None) -> User:
+        with db.tx() as c:
+            uid = _new_id("user", name)
+            c.execute("INSERT INTO user(id, name, birth_date, created_at) VALUES(?, ?, ?, ?)",
+                      (uid, name.strip(), db.birth_from_age(age), time.time()))
+            for r in roles or []:
+                c.execute("INSERT INTO user_role(user_id, role_id) VALUES(?, ?)", (uid, r))
+        return self.get(uid)
 
-    def touch(self, pid: str) -> None:
-        """Отметить, что человека только что узнали (без записи на диск чаще раза в минуту)."""
-        with self.lock:
-            self._load()
-            p = self.items.get(pid)
-            if p and (p.last_seen or 0) < time.time() - 60:
-                p.last_seen = time.time()
-                self._save()
+    def update(self, uid: str, **fields) -> User:
+        """name, roles, birth_date, age (→ дата рождения), aliases, voice ({samples, updated_at}), last_seen."""
+        if "age" in fields:
+            fields["birth_date"] = db.birth_from_age(fields.pop("age"))
+        cols = {"name": "name", "birth_date": "birth_date", "last_seen": "last_seen"}
+        with db.tx() as c:
+            for key, col in cols.items():
+                if key in fields:
+                    c.execute(f"UPDATE user SET {col}=? WHERE id=?", (fields[key], uid))  # noqa: S608
+            if "aliases" in fields:
+                c.execute("UPDATE user SET aliases=? WHERE id=?",
+                          (json.dumps(fields["aliases"], ensure_ascii=False), uid))
+            if "voice" in fields:
+                v = fields["voice"]
+                v = v.model_dump() if isinstance(v, Voice) else v
+                c.execute("UPDATE user SET voice_samples=?, voice_updated=? WHERE id=?",
+                          (v.get("samples", 0), v.get("updated_at"), uid))
+            if "roles" in fields:
+                c.execute("DELETE FROM user_role WHERE user_id=?", (uid,))
+                for r in fields["roles"]:
+                    c.execute("INSERT INTO user_role(user_id, role_id) VALUES(?, ?)", (uid, r))
+        return self.get(uid)
+
+    def delete(self, uid: str) -> bool:
+        return db.ex("DELETE FROM user WHERE id=?", (uid,)) > 0
+
+    def merge(self, src: str, dst: str, samples: int, voice_updated: float | None) -> User:
+        """Голос src уже перенесён в dst (voices.move): обновить dst и удалить src — одной транзакцией."""
+        with db.tx() as c:
+            seen = c.execute("SELECT max(coalesce(last_seen, 0)) FROM user WHERE id IN (?, ?)",
+                             (src, dst)).fetchone()[0]
+            c.execute("UPDATE user SET voice_samples=?, voice_updated=?, last_seen=? WHERE id=?",
+                      (samples, voice_updated, seen or None, dst))
+            c.execute("DELETE FROM user WHERE id=?", (src,))
+        return self.get(dst)
+
+    def touch(self, uid: str) -> None:
+        """Отметить, что человека только что узнали (не чаще раза в минуту)."""
+        db.ex("UPDATE user SET last_seen=? WHERE id=? AND coalesce(last_seen, 0) < ?",
+              (time.time(), uid, time.time() - 60))
 
 
-class RoleStore(JsonStore[Role]):
-    def _loaded(self, fresh: bool) -> None:
-        """Гость есть всегда; при первом запуске — ещё «Админ». Переход со старых версий:
-        «Родитель» (parent) → «Админ» (admin), роли из yaml, на которые ссылаются профили, — создаются
-        (можно переименовать и настроить в админке)."""
-        changed = False
-        if GUEST not in self.items:
-            self.items[GUEST] = Role(id=GUEST, title="Гость", allow_modules=default_modules(), created_at=0)
-            changed = True
-        self.items[GUEST].control = False
-        users_of_parent = [p for p in profiles_store.all() if LEGACY_PARENT in p.roles]
-        if fresh or LEGACY_PARENT in self.items or users_of_parent:
-            self.items.pop(LEGACY_PARENT, None)
-            if ADMIN not in self.items:
-                self.items[ADMIN] = Role(id=ADMIN, title="Админ", control=True,
-                                         allow_modules=default_modules(), created_at=1)
-            for p in users_of_parent:
-                profiles_store.update(p.id, roles=[ADMIN if r == LEGACY_PARENT else r for r in p.roles])
-                log.info("профиль %s: роль «Родитель» → «Админ»", p.id)
-            changed = True
-        for p in profiles_store.all():
-            for r in p.roles:
-                if r not in self.items:
-                    self.items[r] = Role(id=r, title=r, allow_modules=default_modules())
-                    log.info("роль %s создана для профиля %s — настройте в /admin", r, p.id)
-                    changed = True
-        if changed:
-            self._save()
+# ---------- роли ----------
+
+def _role(row) -> Role:
+    allow, deny = {}, {}
+    for r in db.q("SELECT right_id, effect, vals FROM role_right WHERE role_id=? ORDER BY right_id", (row["id"],)):
+        (allow if r["effect"] == "allow" else deny)[r["right_id"]] = json.loads(r["vals"] or "[]")
+    return Role(id=row["id"], title=row["title"], allow=allow, deny=deny, created_at=row["created_at"])
+
+
+class RoleStore:
+    def all(self) -> list[Role]:
+        return [_role(r) for r in db.q("SELECT * FROM role ORDER BY created_at, id")]
+
+    def get(self, rid: str | None) -> Role | None:
+        if not rid:
+            return None
+        row = db.q1("SELECT * FROM role WHERE id=?", (rid,))
+        return _role(row) if row else None
 
     def create(self, title: str) -> Role:
-        with self.lock:
-            self._load()
-            r = Role(id=self._new_id(title), title=title.strip())
-            self.items[r.id] = r
-            self._save()
-            return r
+        rid = _new_id("role", title)
+        db.ex("INSERT INTO role(id, title, created_at) VALUES(?, ?, ?)", (rid, title.strip(), time.time()))
+        return self.get(rid)
+
+    def update(self, rid: str, title: str | None = None, allow: dict | None = None,
+               deny: dict | None = None) -> Role:
+        with db.tx() as c:
+            if title is not None:
+                c.execute("UPDATE role SET title=? WHERE id=?", (title.strip(), rid))
+            for effect, rights in (("allow", allow), ("deny", deny)):
+                if rights is None:
+                    continue
+                c.execute("DELETE FROM role_right WHERE role_id=? AND effect=?", (rid, effect))
+                for right, vals in rights.items():
+                    c.execute("INSERT INTO role_right(role_id, right_id, effect, vals) VALUES(?, ?, ?, ?)",
+                              (rid, right, effect, json.dumps(vals or [], ensure_ascii=False)))
+        return self.get(rid)
+
+    def delete(self, rid: str) -> bool:
+        return db.ex("DELETE FROM role WHERE id=?", (rid,)) > 0   # у людей снимется каскадом
+
+    def users_of(self, rid: str) -> list[str]:
+        return [r[0] for r in db.q("SELECT user_id FROM user_role WHERE role_id=?", (rid,))]
 
 
-def default_modules() -> list[str]:
-    """Модули для роли по умолчанию: все включённые (меняется в админке)."""
-    try:
-        import modules
-        return list(modules.enabled())
-    except Exception:  # noqa: BLE001 — без modules.yaml (тесты, первый запуск)
-        return []
-
-
-store = profiles_store = ProfileStore(DATA_DIR / "profiles.json", Profile, "profiles")
-roles = RoleStore(DATA_DIR / "roles.json", Role, "roles")
+store = users = UserStore()
+roles = RoleStore()

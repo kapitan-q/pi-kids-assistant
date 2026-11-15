@@ -58,6 +58,9 @@ class VoiceStore:
             return None, 0.0
         best, score = None, 0.0
         for pid, v in self.embeddings().items():
+            if len(v) != len(vector):        # голос записан другой моделью voiceid — сравнивать нельзя
+                log.warning("голос %s: другая размерность (%d≠%d) — нужна перезапись", pid, len(v), len(vector))
+                continue
             s = cos(vector, v)
             if s > score:
                 best, score = pid, s
@@ -87,16 +90,20 @@ class VoiceStore:
         """Голос src → dst (объединение профилей); у dst старый голос заменяется. Возвращает число образцов."""
         with self.lock:
             s, d = self._dir(src), self._dir(dst)
-            if not s.exists():
-                return 0
+            if not s.exists():          # у src голоса нет — у dst остаётся свой
+                return self._count(d)
             if d.exists():
                 shutil.rmtree(d)
             s.rename(d)
             self._cache = None
-            try:
-                return len(json.loads((d / "embedding.json").read_text()).get("vectors", []))
-            except (OSError, ValueError):
-                return 0
+            return self._count(d)
+
+    @staticmethod
+    def _count(d: Path) -> int:
+        try:
+            return len(json.loads((d / "embedding.json").read_text()).get("vectors", []))
+        except (OSError, ValueError):
+            return 0
 
     def delete(self, pid: str) -> None:
         with self.lock:

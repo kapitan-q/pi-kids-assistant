@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+import db
 import policy
 
 NIGHT = {"from": "21:30", "to": "07:00", "mode": "night"}
@@ -85,7 +86,7 @@ def test_check_playback_budget(at, monkeypatch):
     at(2026, 11, 16, 23)
     res = policy.resolve(None)
     policy.start_budget(res)
-    policy.state.data["budgets"][res.key] -= 61 * 60
+    db.ex("UPDATE mark SET ts = ts - 3660 WHERE ns = 'budgets'")
     assert policy.check_playback(res, {"source": "books", "tags": ["на ночь"]}) == "budget"
 
 

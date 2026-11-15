@@ -63,3 +63,17 @@ def test_passphrase():
     assert pc.strip_passphrase("капитан немо", "капитан немо") == ""
     assert pc.strip_passphrase("капитан немов включи", "капитан немо") is None
     assert pc.strip_passphrase("включи колобка", "капитан немо") is None
+
+
+@pytest.mark.parametrize("text", ["сними с паузы", "замолчи", "отмена", "сказка про уроки", "молчи",
+                                  "включи сказку про тишину", "расскажи про ночной режим у ежей"])
+def test_not_commands(text):
+    assert pc.parse(text, PROFILES, datetime(2026, 11, 16, 12)) is None
+
+
+def test_who_by_name_and_role():
+    targets = {**PROFILES, "masha": {"name": "Маша"}, "child": {"name": "Дети"}}
+    now = datetime(2026, 11, 16, 12)
+    assert pc.parse("тихий час для маши", targets, now)["who"] == ["masha"]
+    assert pc.parse("уроки для детей до пяти", targets, now)["who"] == ["child"]
+    assert pc.parse("отбой режимов для старшего", targets, now) == {"mode": "clear", "who": ["older"], "until": None}

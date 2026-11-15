@@ -5,7 +5,7 @@ POST /text   {"device_id", "text", "speaker"?, "now_playing"?, "source"?} — т
              speaker учитывается только с X-Admin-Token)
 POST /reset  {"device_id"}                                 — забыть контекст разговора
 POST /progress {"source", "item_id", "position", "finished"} — где остановились (Pi раз в 30 с)
-GET  /policy                                               — текущие лимиты (Pi опрашивает раз в минуту)
+GET  /policy?device_id=…  — текущие лимиты для того, кто включил то, что играет (Pi раз в минуту)
 GET  /speech/<id>.wav                                      — озвученный ответ
 GET  /m/<модуль>/<путь>                                    — файлы модулей (прокси; за Traefik — напрямую)
 GET  /health, /livez
@@ -62,6 +62,7 @@ import parent_commands
 import policy
 import profiles
 import quick_commands
+import rights
 import voices
 
 logging.basicConfig(level=logging.INFO)
@@ -85,7 +86,8 @@ LEGACY_SOURCE = os.getenv("LEGACY_SOURCE", "books")
 CORE_SERVICES = {"stt": STT_URL, "tts": TTS_URL, "agent": AGENT_URL, "voiceid": VOICEID_URL}
 
 http: httpx.AsyncClient
-now_playing: dict[str, dict] = {}     # device_id -> {"source", "item_id", "tags", "age_min"} последнего play
+# device_id -> {"source", "item_id", "tags", "age_min", "speaker"} последнего play (speaker — кто включил)
+now_playing: dict[str, dict] = {}
 _background: set[asyncio.Task] = set()
 
 
@@ -95,12 +97,14 @@ async def lifespan(_app: FastAPI):
     SPEECH_DIR.mkdir(parents=True, exist_ok=True)
     http = httpx.AsyncClient(timeout=httpx.Timeout(AGENT_HTTP_TIMEOUT, connect=5.0))
     log.info("роли: %s", [r.id for r in profiles.roles.all()])
-    log.info("модули: %s, профили: %s", list(modules.enabled()), [p.id for p in profiles.store.all()])
+    log.info("модули: %s, пользователи: %s", list(modules.enabled()), [u.id for u in profiles.store.all()])
     if not admin.ADMIN_PASSWORD_HASH:
         log.warning("ADMIN_PASSWORD_HASH не задан — /admin не пустит никого")
     if not ADMIN_TOKEN:
         log.warning("ADMIN_TOKEN не задан — /control выключен")
+    rights_task = asyncio.create_task(rights.refresh_loop())   # права, которые объявляют модули
     yield
+    rights_task.cancel()
     await http.aclose()
 
 
@@ -236,23 +240,37 @@ def _say_time(dt) -> str:
     return lang.t("time.hours_minutes", h=dt.hour, m=dt.minute) if dt.minute else lang.t("time.hours", h=dt.hour)
 
 
-async def handle_parent_command(text: str, can_relax: bool) -> dict | None:
-    kids = {pid: policy.profile(pid) for pid in policy.children()}
-    cmd = parent_commands.parse(text, kids, policy.now())
+def command_targets() -> dict[str, dict]:
+    """Кого можно назвать в голосовой команде режима: люди, на которых действуют режимы, и роли."""
+    out = {uid: policy.profile(uid) for uid in policy.targets()}
+    out.update({r.id: {"name": r.title} for r in profiles.roles.all() if r.id != profiles.GUEST})
+    return out
+
+
+def _target_name(tid: str) -> str:
+    p = policy.profile(tid)
+    if p:
+        return p["name"]
+    r = profiles.roles.get(tid)
+    return r.title if r else tid
+
+
+async def handle_parent_command(text: str, can_relax: bool, actor: str | None = None,
+                                via: str = "voice") -> dict | None:
+    cmd = parent_commands.parse(text, command_targets(), policy.now())
     if not cmd:
         return None
     names = ""
     if cmd["who"]:
-        names = lang.t("parent.for_names", names=", ".join(
-            policy.profile(w).get("name", w).lower() for w in cmd["who"]))
+        names = lang.t("parent.for_names", names=", ".join(_target_name(w).lower() for w in cmd["who"]))
     if cmd["mode"] == "clear":
         if not can_relax:
             return {"reply": lang.t("parent.relax_denied")}
-        policy.relax(cmd["who"])
+        policy.relax(cmd["who"], via, actor)
         return {"reply": lang.t("parent.ok_clear", names=names)}
     conf = policy.mode_conf(cmd["mode"])
     until = cmd["until"] or policy.now() + timedelta(minutes=conf.get("default_minutes", 60))
-    policy.add_override(cmd["mode"], until, cmd["who"])
+    policy.add_override(cmd["mode"], until, cmd["who"], via, actor)
     return {"reply": lang.t("parent.ok_mode", title=conf.get("title", cmd["mode"]), names=names,
                             time=_say_time(until))}
 
@@ -262,66 +280,72 @@ async def _answer(text: str, reply: str, action: dict | None, lim: dict, **extra
             "action": to_pi(action), "limits": lim, **extra}
 
 
-def available_modules(res, speaker: str | None) -> dict[str, str]:
-    """Модули, которые сейчас можно включать: включённые ∩ режим (если он действует на говорящего) ∩ роли."""
-    acc = policy.access(speaker)
-    return modules.titles(acc["modules"] if policy.can_control(speaker) else policy.allowed_modules(res, acc))
+def agent_rights(res, speaker: str | None) -> dict:
+    """Что агент передаёт модулям: какие модули подключить и права каждого (+ возраст)."""
+    g = policy.grants(speaker)
+    mods = policy.allowed_modules(res, g) or []
+    return {"modules": {m: g.for_module(m) for m in mods}, "age": g.age}
 
 
 async def handle_text(device_id: str, text: str, speaker: str | None,
                       playing: tuple[str | None, str | None] = (None, None),
                       utt: onboarding.Utterance | None = None, admin_verified: bool = False) -> dict:
-    """playing = (source, item_id) того, что загружено в плеере Pi; utt — голос фразы (для знакомства)."""
+    """playing = (source, item_id) того, что загружено в плеере Pi; utt — голос фразы (для знакомства).
+    Порядок важен: знакомство → команды плееру → команды режимов → блокировка режимом →
+    «давай познакомимся» → гостевой доступ → агент."""
     utt = utt or onboarding.Utterance(text=text)
+    res = policy.resolve(speaker)          # у кого core.modes_exempt — всегда default
+    lim = policy.limits(res)
+
     # 0. Идёт знакомство — все реплики ему
     if onboarding.active(device_id):
         r = onboarding.step(device_id, utt)
-        return await _answer(text, r["reply"], None, policy.limits(policy.resolve(speaker)),
-                             onboarding=True, expect_reply=r["expect_reply"])
+        return await _answer(text, r["reply"], None, lim, onboarding=True, expect_reply=r["expect_reply"])
 
-    # 1. Команды режимов («тихий час», «режим уроков для старшего», «отбой тишины»).
-    #    Тот, у кого в роли стоит «может устанавливать и снимать ограничения» (узнан по голосу),
-    #    даёт их без кодовой фразы — и ставит, и снимает. Кодовая фраза без такой роли — только
-    #    ужесточить (фразу могут подслушать). С админ-токеном (/text для скриптов) — всё.
+    # 1. Простые команды плееру («стоп», «потише», «сними с паузы») — сразу, без Claude.
+    #    Раньше команд режимов: «замолчи» — это «стоп», а не тихий час. Работают и для неузнанного
+    #    голоса (короткие фразы узнаются хуже всего); «продолжай» всё равно проверяется правилами.
+    if QUICK_COMMANDS and (quick := quick_commands.parse(text)) is not None:
+        action, reply, lim = await enforce(quick["action"], "", res, lim, device_id, playing, speaker)
+        log.info("quick %s: %r -> %s", device_id, text, action)
+        return await _answer(text, reply, action, lim, quick=True)
+
+    # 2. Команды режимов («тихий час», «режим уроков для старшего», «отбой тишины») — фразой целиком.
+    #    С правом core.control (узнан по голосу) — без кодовой фразы, и ставить, и снимать.
+    #    Кодовая фраза без права — только ужесточить (фразу могут подслушать). Админ-токен — всё.
     #    К агенту такие фразы не уходят.
-    cfg = policy.config()
-    parent_cfg = cfg.get("parent") or {}
     controller = policy.can_control(speaker)
-    rest = parent_commands.strip_passphrase(text, parent_cfg.get("passphrase", ""))
+    rest = parent_commands.strip_passphrase(text, (policy.config().get("parent") or {}).get("passphrase", ""))
     if rest is not None or controller:
         cmd_text = rest if rest is not None else text
-        result = await handle_parent_command(cmd_text, can_relax=admin_verified or controller)
+        result = await handle_parent_command(cmd_text, can_relax=admin_verified or controller,
+                                             actor=speaker, via="api" if admin_verified else "voice")
         if result:
-            return await _answer(cmd_text, result["reply"], None,
-                                 policy.limits(policy.resolve(None)), parent_command=True)
+            return await _answer(cmd_text, result["reply"], None, lim, parent_command=True)
         if rest is not None:
-            return await _answer(cmd_text, lang.t("parent.not_understood"), None,
-                                 policy.limits(policy.resolve(None)), parent_command=True)
+            return await _answer(cmd_text, lang.t("parent.not_understood"), None, lim, parent_command=True)
 
-    # 2. Режим для этого говорящего
-    res = policy.resolve(speaker)
-    lim = policy.limits(res)
-    if not policy.children_allowed(res) and not controller:
+    # 3. Режим блокирует этого говорящего
+    if not policy.children_allowed(res):
         reply = res.conf.get("message", "") if policy.announce_once(res) else ""
         return await _answer(text, reply, {"type": "stop"}, lim, blocked=True)
 
-    # 2a. «Давай познакомимся» — новый профиль голосом
+    # 4. «Давай познакомимся» — новый пользователь голосом
     if onboarding.is_trigger(text):
         r = onboarding.start(device_id, utt, speaker)
         return await _answer(text, r["reply"], None, lim, onboarding=True, expect_reply=r["expect_reply"])
 
-    # 3. Простые команды плееру («стоп», «потише», «продолжай») — сразу, без Claude
-    if QUICK_COMMANDS and (quick := quick_commands.parse(text)) is not None:
-        action, reply, lim = await enforce(quick["action"], "", res, lim, device_id, playing,
-                                           speaker, controller)
-        log.info("quick %s: %r -> %s", device_id, text, action)
-        return await _answer(text, reply, action, lim, quick=True)
+    # 5. Гостевой доступ выключен: неузнанному и человеку без ролей — только плеер и знакомство
+    if policy.unverified(speaker) and not admin_verified and not policy.guest_enabled():
+        key = "guest_off.no_roles" if speaker else "guest_off.unknown"
+        return await _answer(text, lang.t(key), None, lim, guest_off=True)
 
-    # 4. Агент
+    # 6. Агент: подключает только доступные модули и передаёт им права говорящего
     try:
         r = await http.post(f"{AGENT_URL}/chat", json={
             "device_id": device_id, "text": text,
-            "context": policy.agent_context(res, speaker, available_modules(res, speaker)),
+            "context": policy.agent_context(res, speaker, policy.available_titles(res, speaker)),
+            "rights": agent_rights(res, speaker),
         })
         r.raise_for_status()
         data = r.json()
@@ -330,28 +354,28 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         return await _answer(text, lang.t("fallback"), None, lim, error="agent")
     reply = data.get("reply", "")
     action = actions.validate(data.get("action"), modules.enabled())
-    action, reply, lim = await enforce(action, reply, res, lim, device_id, playing, speaker, controller)
+    action, reply, lim = await enforce(action, reply, res, lim, device_id, playing, speaker)
     return await _answer(text, reply, action, lim)
 
 
 async def enforce(action: dict | None, reply: str, res, lim: dict, device_id: str,
-                  playing: tuple[str | None, str | None], speaker: str | None,
-                  controller: bool) -> tuple[dict | None, str, dict]:
-    """Страховка: правила режима и ролей важнее того, что решил агент (или быстрая команда) —
+                  playing: tuple[str | None, str | None],
+                  speaker: str | None) -> tuple[dict | None, str, dict]:
+    """Страховка: режим и права говорящего важнее того, что решил агент (или быстрая команда) —
     и для нового, и для «продолжай»/перемотки уже загруженного."""
     if action and action["type"] in ("play", "resume", "seek"):
         if action["type"] == "play":
             item = {k: action.get(k) for k in ("source", "item_id", "tags", "age_min")}
         else:
             item = await playing_item(device_id, *playing)
-        deny = policy.check_playback(res, item, policy.access(speaker), modes=not controller)
+        deny = policy.check_playback(res, item, policy.grants(speaker))
         if deny:
             action, reply = ({"type": "stop"} if action["type"] != "play" else None), deny
         else:
             policy.start_budget(res)
             lim = policy.limits(res)  # пересчитать stop_after_sec
-    if action and action["type"] == "play":
-        now_playing[device_id] = {k: action.get(k) for k in ("source", "item_id", "tags", "age_min")}
+            if item:   # дальше лимиты для Pi (/policy) считаются для того, кто включил
+                now_playing[device_id] = {**now_playing.get(device_id, {}), **item, "speaker": speaker}
     if action and action["type"] == "volume" and action.get("level"):
         action["level"] = min(action["level"], lim["max_volume"])
     return action, reply, lim
@@ -398,7 +422,11 @@ async def ask(audio: UploadFile = File(...), device_id: str = Form("default"),
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "audio too large")
     name = audio.filename or "audio.wav"
-    text, vp = await asyncio.gather(transcribe(data, name), voice_print(data, name))   # параллельно
+    try:
+        text, vp = await asyncio.gather(transcribe(data, name), voice_print(data, name))   # параллельно
+    except (httpx.HTTPError, KeyError, ValueError):
+        log.exception("STT не ответил")
+        return await _answer("", lang.t("fallback"), None, policy.limits(policy.resolve(None)), error="stt")
     t_stt = time.monotonic()
     if not text:
         return {"heard": "", "reply": "", "speech_url": None, "action": None,
@@ -428,8 +456,11 @@ async def ask_text(body: TextIn, x_admin_token: str | None = Header(default=None
 
 @app.post("/reset", dependencies=[Depends(check_token)])
 async def reset(body: ResetIn):
-    r = await http.post(f"{AGENT_URL}/reset", json={"device_id": body.device_id})
-    r.raise_for_status()
+    try:
+        r = await http.post(f"{AGENT_URL}/reset", json={"device_id": body.device_id})
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(502, "agent unavailable") from e
     return {"ok": True}
 
 
@@ -442,8 +473,11 @@ async def progress(body: ProgressIn):
 
 
 @app.get("/policy", dependencies=[Depends(check_token)])
-async def get_policy():
-    return policy.limits(policy.resolve(None))
+async def get_policy(device_id: str | None = None):
+    """Лимиты для того, кто включил то, что сейчас загружено на устройстве: сказку папы ночью
+    не выключит, режим «для старшего» не глушит младшего. Не знаем, кто включил, — как для неузнанного."""
+    speaker = (now_playing.get(device_id) or {}).get("speaker") if device_id else None
+    return policy.limits(policy.resolve(speaker))
 
 
 @app.get("/speech/{name}")
@@ -469,7 +503,10 @@ async def module_files(module: str, path: str, request: Request):
     headers = {h: v for h, v in request.headers.items() if h.lower() in ("range", "if-range")}
     upstream = http.build_request(request.method, f"{base}/{path}", headers=headers,
                                   timeout=httpx.Timeout(30, read=None))
-    r = await http.send(upstream, stream=True)
+    try:
+        r = await http.send(upstream, stream=True)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"module {module} unavailable") from e
     out_headers = {h: v for h, v in r.headers.items() if h.lower() in PROXY_HEADERS}
     if request.method == "HEAD":
         await r.aclose()
@@ -490,12 +527,12 @@ async def admin_override(body: OverrideIn):
     if body.mode not in (policy.config().get("modes") or {}):
         raise HTTPException(400, f"нет режима {body.mode}")
     minutes = body.minutes or policy.mode_conf(body.mode).get("default_minutes", 60)
-    return policy.add_override(body.mode, policy.now() + timedelta(minutes=minutes), body.who)
+    return policy.add_override(body.mode, policy.now() + timedelta(minutes=minutes), body.who, "api")
 
 
 @app.delete("/control/override", dependencies=[Depends(check_admin)])
 async def admin_clear(who: str | None = None):
-    removed = policy.relax([who] if who else None)
+    removed = policy.relax([who] if who else None, "api")
     return {"removed": removed, "now": policy.status()}
 
 

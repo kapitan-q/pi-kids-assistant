@@ -92,3 +92,23 @@ def test_stems():
     assert cat.stems_of("про лису") == ["лис"]
     assert cat.stems_of("про ёжика") == ["ежик", "еж"]
     assert cat.stems_of("волк") == ["волк"]
+
+
+def test_rights_filter(c):
+    ids = lambda res: {t["id"] for t in res}  # noqa: E731
+    assert "teterev" not in ids(c.search("лиса", deny=["басня"]))
+    assert ids(c.search("", limit=20, allow=["На ночь"])) == {"teterev", "medved"}
+    assert not c.permitted(c.get("kuma"), age=5) and c.permitted(c.get("kuma"), age=6)
+
+
+def test_listener_headers():
+    import app as books
+
+    class Req:
+        headers = {"x-ks-rights": '{"books.tags": {"allow": null, "deny": ["страшные"]}}', "x-ks-age": "7"}
+
+    class Ctx:
+        request_context = type("RC", (), {"request": Req()})()
+    assert books.listener(Ctx()) == {"allow": None, "deny": ["страшные"], "age": 7}
+    assert books.listener(None) == {"allow": None, "deny": None, "age": None}
+    assert books._narrow_age(10, 7) == 7 and books._narrow_age(None, 7) == 7 and books._narrow_age(5, None) == 5

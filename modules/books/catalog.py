@@ -253,10 +253,24 @@ class Catalog:
         d["has_audio"] = self.audio_file(tale) is not None
         return d
 
-    def _filtered(self, age, max_minutes, tag) -> list[dict]:
+    @staticmethod
+    def permitted(tale: dict, allow: list[str] | None = None, deny: list[str] | None = None,
+                  age: int | None = None) -> bool:
+        """Права слушателя (их передаёт ядро): allow — только с этими тегами, deny — без этих, age —
+        не младше нижней границы книги."""
+        tags = {_norm(x) for x in tag_list(tale["tags"])}
+        if allow and not tags & {_norm(x) for x in allow}:
+            return False
+        if deny and tags & {_norm(x) for x in deny}:
+            return False
+        return age is None or (tale["age_min"] or 0) <= age
+
+    def _filtered(self, age, max_minutes, tag, allow=None, deny=None) -> list[dict]:
         self.ensure_fresh()
         out = []
         for t in self.tales.values():
+            if not self.permitted(t, allow, deny):
+                continue
             # возраст фильтрует только снизу («рано»: «Премудрый пискарь» пятилетке).
             # Верхняя граница — «может быть скучно», а не запрет: восьмилетний просит «Мойдодыра» — включаем.
             if age is not None and (t["age_min"] or 0) > age:
@@ -268,9 +282,10 @@ class Catalog:
             out.append(t)
         return out
 
-    def search(self, query: str = "", age=None, max_minutes=None, limit: int = 5) -> list[dict]:
+    def search(self, query: str = "", age=None, max_minutes=None, limit: int = 5,
+               allow=None, deny=None) -> list[dict]:
         limit = max(1, min(int(limit), 20))
-        pool = self._filtered(age, max_minutes, None)
+        pool = self._filtered(age, max_minutes, None, allow, deny)
         stems = stems_of(query or "")
         if not stems:
             pool.sort(key=lambda t: (-self.plays.get(t["id"]), t["title"]))
@@ -280,8 +295,8 @@ class Catalog:
         scored.sort(key=lambda st: (-st[0], st[1]["title"]))
         return [self.public(t) for _, t in scored[:limit]]
 
-    def random(self, tag=None, age=None, max_minutes=None) -> dict | None:
-        pool = [t for t in self._filtered(age, max_minutes, tag) if self.audio_file(t)]
+    def random(self, tag=None, age=None, max_minutes=None, allow=None, deny=None) -> dict | None:
+        pool = [t for t in self._filtered(age, max_minutes, tag, allow, deny) if self.audio_file(t)]
         if not pool:
             return None
         # реже слушанные выпадают чаще

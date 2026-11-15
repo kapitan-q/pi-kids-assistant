@@ -8,19 +8,22 @@
   :root {
     --bg: #f6f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b665e; --line: #e4e0d8;
     --accent: #2f6f5e; --accent-text: #ffffff; --danger: #b3412f; --chip: #eef3f1; --warn: #fbf1dc;
+    --deny: #fbe9e5;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161513; --card: #211f1c; --text: #ece8e1; --muted: #a39d93; --line: #35322d;
       --accent: #5fb39b; --accent-text: #10201b; --danger: #e07a66; --chip: #24302c; --warn: #3a3020;
+      --deny: #3a2420;
     }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
-  main > h1:not(:first-child) { margin-top: 32px; }
+  main { max-width: 820px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 32px 0 4px; }
+  h1:first-child { margin-top: 0; }
+  h3 { font-size: 14px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
   .lead { color: var(--muted); margin: 0 0 12px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
           padding: 16px; margin-bottom: 14px; }
@@ -34,7 +37,7 @@
   @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
   .wide { grid-column: 1 / -1; }
   label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], input[type=date], input[type=time], select {
     width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--bg); color: var(--text); font: inherit; }
   .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
@@ -50,24 +53,49 @@
   .summary { font-size: 13px; color: var(--muted); margin-top: 10px; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 10px;
          padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  .row:last-of-type { border-bottom: 0; }
+  .row:last-child { border-bottom: 0; }
   .mode-on { color: var(--danger); font-weight: 600; }
-  .toggle, .add { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+  .toggle, .add, .inline { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
   .add input { flex: 1; min-width: 180px; width: auto; }
+  .inline > * { width: auto; }
   .switch { display: inline-flex; gap: 8px; align-items: center; color: var(--text); font-size: 15px;
             font-weight: 600; margin: 0; }
+  .right { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center;
+           padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .right:last-child { border-bottom: 0; }
+  .right .t { font-size: 14px; }
+  .right .d { font-size: 12px; color: var(--muted); grid-column: 1 / -1; }
+  .tri { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tri button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 13px; }
+  .tri button.on.allow { background: var(--accent); color: var(--accent-text); }
+  .tri button.on.deny { background: var(--danger); color: #fff; }
+  .vals { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  @media (max-width: 560px) { .vals { grid-column: 1 / -1; grid-template-columns: 1fr; } }
+  .log { font-size: 13px; }
+  .log .row { padding: 5px 0; }
 </style>
 </head>
 <body>
 <main>
   <h1>Сейчас</h1>
-  <p class="lead">Режимы, которые действуют прямо сейчас. Если колонка не узнала голос родителя —
-    ограничение можно снять здесь (до конца окна расписания или команды).</p>
+  <p class="lead">Какие режимы действуют. Включить режим можно отсюда, голосом («тихий час на час») или
+    кодовой фразой. Снять — отсюда или голосом того, кому роль даёт право «ставить и снимать ограничения».</p>
   <div id="now" class="card"><div class="status">Загружаю…</div></div>
+  <div class="card">
+    <div class="name">Включить режим</div>
+    <div class="grid">
+      <div><label>Режим</label><select id="ov-mode"></select></div>
+      <div><label>Для кого</label><select id="ov-who"></select></div>
+      <div><label>На сколько минут</label><input type="number" id="ov-min" min="1" max="1440" placeholder="по умолчанию"></div>
+      <div><label>…или до</label><input type="time" id="ov-until"></div>
+    </div>
+    <div class="actions"><button class="primary" id="ov-go">Включить</button><span class="status" id="ov-status"></span></div>
+  </div>
 
   <h1>Роли</h1>
-  <p class="lead">Роль — что можно. У человека может быть несколько ролей: разрешено то, что разрешает
-    хоть одна, кроме того, что запрещает любая. «Гость» — для неузнанного голоса и людей без ролей.</p>
+  <p class="lead">Роль — набор прав: что разрешено и что запрещено. У человека может быть несколько ролей:
+    разрешено то, что разрешила хоть одна, минус всё, что запретила любая. Права объявляют ядро и модули.
+    «Гость» — права неузнанного голоса и людей без ролей; ставить и снимать ограничения гостю нельзя.</p>
   <div id="roles"><div class="empty">Загружаю…</div></div>
   <div class="card add">
     <input type="text" id="new-role" maxlength="40" placeholder="Название новой роли, например «Дети»">
@@ -76,225 +104,247 @@
   </div>
 
   <h1>Люди</h1>
-  <p class="lead">Человек появляется здесь, когда скажет колонке «давай познакомимся» — сначала без ролей,
-    как гость. Отметьте ему роли.</p>
+  <p class="lead">Человек появляется здесь, когда скажет колонке «давай познакомимся» — без ролей, с правами гостя.
+    Отметьте ему роли. Обращения — как его называют в командах («старший», «машенька»).</p>
   <div class="card toggle">
-    <label class="switch"><input type="checkbox" id="onboarding" disabled> Разрешить новые знакомства</label>
-    <span class="status" id="onboarding-status">Узнанный голос может только перезаписать свой профиль.</span>
+    <label class="switch"><input type="checkbox" id="onboarding"> Разрешить новые знакомства</label>
+    <label class="switch"><input type="checkbox" id="guest"> Гостевой доступ</label>
+    <span class="status" id="settings-status"></span>
+    <div class="meta wide">Гостевой доступ выключен — неузнанному голосу колонка отвечает «я тебя не узнала»
+      (команды плееру и знакомство работают). Включайте, пока колонку пробуют, выключайте, когда все познакомились.</div>
   </div>
-  <div id="list"><div class="empty">Загружаю…</div></div>
-  <p class="status">«Объединить» переносит записанный голос в другой профиль (например, в «Старший»),
-    чтобы правила расписания для него продолжили работать. Режимы и расписание — в <code>config/speaker.yaml</code>.</p>
+  <div id="users"><div class="empty">Загружаю…</div></div>
+
+  <h1>Журнал</h1>
+  <div id="log" class="card log"><div class="status">Загружаю…</div></div>
 </main>
 <script>
-const $ = (sel, el = document) => el.querySelector(sel);
-const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const split = s => s.split(",").map(x => x.trim()).filter(Boolean);
-let data = null;
-
-function when(ts) {
-  if (!ts) return "ещё не узнавала";
-  const d = new Date(ts * 1000);
-  return "узнала " + d.toLocaleString("ru-RU", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
-}
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+let S = null;
 
 async function api(method, path, body) {
   const r = await fetch("/admin/api" + path, {method, headers: {"Content-Type": "application/json"},
-                                               body: body ? JSON.stringify(body) : undefined});
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+                                              body: body ? JSON.stringify(body) : undefined});
+  if (!r.ok) {
+    let msg = r.status + "";
+    try { msg = (await r.json()).detail || msg; } catch (e) {}
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
   return r.json();
 }
 
-const roleTitle = id => data.roles.find(r => r.id === id)?.title || id;
-const modTitles = ids => ids.map(m => data.modules[m] || m).join(", ");
+const time = iso => iso ? iso.slice(11, 16) : "";
+const rightsById = () => Object.fromEntries(S.rights.map(r => [r.id, r]));
+const roleTitle = id => (S.roles.find(r => r.id === id) || {}).title || id;
+const userName = id => (S.users.find(u => u.id === id) || {}).name || id;
 
-function checks(name, selected) {
-  const items = Object.entries(data.modules);
-  if (!items.length) return '<span class="status">модулей нет</span>';
-  return `<div class="checks">${items.map(([k, t]) =>
-    `<label><input type="checkbox" name="${name}" value="${esc(k)}" ${selected.includes(k) ? "checked" : ""}> ${esc(t)}</label>`
-  ).join("")}</div>`;
+function renderNow() {
+  const c = S.control;
+  $("#onboarding").checked = c.onboarding_enabled;
+  $("#guest").checked = c.guest_enabled;
+  const rows = c.people.map(p => `
+    <div class="row">
+      <div><b>${esc(p.name || "Неузнанный голос")}</b>
+        <span class="${p.restricted ? "mode-on" : "meta"}">${esc(p.title)}</span>
+        ${p.until ? `<span class="meta">до ${time(p.until)}</span>` : ""}
+        ${p.source === "schedule" ? '<span class="chip">по расписанию</span>' : ""}</div>
+      ${p.restricted && p.id ? `<button data-relax="${esc(p.id)}">Снять</button>` : ""}
+    </div>`).join("");
+  const any = c.people.some(p => p.restricted);
+  $("#now").innerHTML = rows + `<div class="actions">
+      ${any ? '<button class="danger" data-relax="">Снять все ограничения</button>' : '<span class="status">Ограничений нет</span>'}
+      <span class="meta">${esc(time(c.now))}</span></div>`;
+  $("#ov-mode").innerHTML = c.modes.map(m => `<option value="${esc(m.id)}">${esc(m.title)} (${m.default_minutes} мин)</option>`).join("");
+  const who = [`<option value="">Для всех</option>`]
+    .concat(S.roles.filter(r => !r.builtin).map(r => `<option value="${esc(r.id)}">Роль: ${esc(r.title)}</option>`))
+    .concat(S.users.map(u => `<option value="${esc(u.id)}">${esc(u.name)}</option>`));
+  const keep = $("#ov-who").value;
+  $("#ov-who").innerHTML = who.join("");
+  $("#ov-who").value = keep;
 }
 
-function roleCard(r) {
-  const used = r.used_by.length ? `у ${r.used_by.length} чел.` : "ни у кого";
-  const control = r.id === "guest" ? ""
-    : `<div class="wide checks"><label><input type="checkbox" name="control" ${r.control ? "checked" : ""}>
-         Может устанавливать и снимать ограничения</label></div>
-       <div class="wide status">Голосом ставит и снимает режимы (тихий час, уроки, ночь) без кодовой фразы;
-         сами режимы его не ограничивают.</div>`;
-  const body = `<div class="grid">
-        <div><label>Разрешённые модули</label>${checks("allow", r.allow_modules)}</div>
-        <div><label>Запрещённые модули</label>${checks("deny", r.deny_modules)}</div>
-        <div class="wide"><label>Запрещённые теги (через запятую)</label>
-          <input type="text" name="deny_tags" value="${esc(r.deny_tags.join(", "))}" placeholder="страшные, возраст:12-16"></div>
-        ${control}
-      </div>`;
-  return `<div class="card" data-role="${esc(r.id)}">
-    <div class="head">
-      <div class="name">${esc(r.title)}${r.builtin ? '<span class="chip">встроенная</span>' : ""}</div>
-      <div class="meta">${esc(used)} · id ${esc(r.id)}</div>
+function rightRow(r, role) {
+  const a = role.allow[r.id], d = role.deny[r.id];
+  const state = a !== undefined ? "allow" : (d !== undefined && (r.kind === "flag" || !d.length) ? "deny" : "");
+  const guestLock = role.id === "guest" && r.id === "core.control";
+  if (r.kind === "values") {
+    const hint = r.hint.length ? `list="h-${esc(r.id)}"` : "";
+    return `<div class="right"><div class="t">${esc(r.title)}</div><div></div>
+      <div class="vals">
+        <div><label>Разрешены только (пусто — любые)</label>
+          <input type="text" data-vals="allow" data-right="${esc(r.id)}" ${hint} value="${esc((a || []).join(", "))}"></div>
+        <div><label>Запрещены</label>
+          <input type="text" data-vals="deny" data-right="${esc(r.id)}" ${hint} value="${esc((d || []).join(", "))}"></div>
+      </div>
+      ${r.description ? `<div class="d">${esc(r.description)}</div>` : ""}</div>`;
+  }
+  return `<div class="right"><div class="t">${esc(r.title)}</div>
+    <div class="tri" data-right="${esc(r.id)}" data-state="${state}">
+      <button type="button" class="${state === "" ? "on" : ""}" data-set="">—</button>
+      <button type="button" class="allow ${state === "allow" ? "on" : ""}" data-set="allow" ${guestLock ? "disabled" : ""}>можно</button>
+      <button type="button" class="deny ${state === "deny" ? "on" : ""}" data-set="deny">нельзя</button>
     </div>
-    <div class="grid"><div class="wide"><label>Название</label>
-      <input type="text" name="title" value="${esc(r.title)}" maxlength="40"></div></div>
-    ${body}
-    <div class="actions">
-      <button class="primary" data-act="save-role">Сохранить</button>
-      ${r.builtin ? "" : '<button class="danger" data-act="delete-role">Удалить</button>'}
-      <span class="status"></span>
-    </div>
-  </div>`;
+    ${r.description ? `<div class="d">${esc(r.description)}</div>` : ""}</div>`;
 }
 
-function profileCard(p) {
-  const roles = data.roles.filter(r => r.id !== "guest").map(r =>
-    `<label><input type="checkbox" name="role" value="${esc(r.id)}" ${p.roles.includes(r.id) ? "checked" : ""}> ${esc(r.title)}</label>`
-  ).join("");
-  const chips = p.unverified ? `<span class="chip warn">${esc(roleTitle("guest"))} — роли не назначены</span>`
-    : p.roles.map(r => `<span class="chip">${esc(roleTitle(r))}</span>`).join("");
-  const eff = `модули: ${esc(modTitles(p.effective.modules) || "никаких")}` +
-      (p.effective.deny_tags.length ? `; нельзя теги: ${esc(p.effective.deny_tags.join(", "))}` : "") +
-      (p.age ? `; возраст ${p.age} — не включу то, что для старших` : "") +
-      (p.can_control ? "; <b>управляет ограничениями</b>" : "");
-  const others = data.profiles.filter(o => o.id !== p.id)
-    .map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join("");
-  const voice = p.voice.samples ? `голос: ${p.voice.samples} образц.` : "голос не записан";
-  return `<div class="card" data-id="${esc(p.id)}">
-    <div class="head">
-      <div class="name">${esc(p.name)}${chips}</div>
-      <div class="meta">${esc(voice)} · ${esc(when(p.last_seen))} · id ${esc(p.id)}</div>
-    </div>
-    <div class="grid">
-      <div class="wide"><label>Роли</label><div class="checks">${roles}</div></div>
-      <div><label>Имя</label><input type="text" name="name" value="${esc(p.name)}" maxlength="40"></div>
-      <div><label>Возраст</label><input type="number" name="age" min="1" max="120" value="${esc(p.age ?? "")}"></div>
-      <div class="wide"><label>Как называют в командах родителя (через запятую)</label>
-        <input type="text" name="aliases" value="${esc(p.aliases.join(", "))}" placeholder="старш"></div>
-    </div>
-    <p class="summary">Итого: ${eff}</p>
-    <div class="actions">
-      <button class="primary" data-act="save">Сохранить</button>
-      ${others ? `<select name="into" aria-label="Объединить с">${others}</select>
-                  <button data-act="merge">Объединить</button>` : ""}
-      <button class="danger" data-act="delete">Удалить</button>
-      <span class="status"></span>
-    </div>
-  </div>`;
+function renderRoles() {
+  const groups = {};
+  for (const r of S.rights) (groups[r.module] = groups[r.module] || []).push(r);
+  const groupTitle = m => m === "core" ? "Ядро" : (S.modules[m] || m);
+  const lists = S.rights.filter(r => r.hint.length)
+    .map(r => `<datalist id="h-${esc(r.id)}">${r.hint.map(h => `<option value="${esc(h)}">`).join("")}</datalist>`).join("");
+  $("#roles").innerHTML = lists + S.roles.map(role => `
+    <div class="card" data-role="${esc(role.id)}">
+      <div class="head"><div class="name">${esc(role.title)}${role.builtin ? '<span class="chip">встроенная</span>' : ""}</div>
+        <div class="meta">id: ${esc(role.id)} · ${role.used_by.length ? "у " + role.used_by.map(userName).map(esc).join(", ") : "ни у кого"}</div></div>
+      <div class="grid"><div class="wide"><label>Название</label><input type="text" data-k="title" maxlength="40" value="${esc(role.title)}"></div></div>
+      ${Object.entries(groups).map(([m, rs]) => `<h3>${esc(groupTitle(m))}</h3>` + rs.map(r => rightRow(r, role)).join("")).join("")}
+      <div class="actions"><button class="primary" data-save-role>Сохранить</button>
+        ${role.builtin ? "" : '<button class="danger" data-del-role>Удалить</button>'}
+        <span class="status"></span></div>
+    </div>`).join("");
 }
 
-function render() {
-  $("#roles").innerHTML = data.roles.map(roleCard).join("");
-  $("#list").innerHTML = data.profiles.length ? data.profiles.map(profileCard).join("")
-    : '<div class="empty">Пока никого. Скажите колонке «давай познакомимся».</div>';
+function describe(u) {
+  const R = rightsById(), e = u.effective, parts = [];
+  const mods = e.flags.filter(f => !f.startsWith("core.")).map(f => (R[f] || {}).title || f);
+  parts.push(mods.length ? mods.join(", ").replace(/Доступ: /g, "") : "модулей нет");
+  for (const [id, v] of Object.entries(e.values)) {
+    const t = (R[id] || {}).title || id;
+    if (v.allow) parts.push(`${t}: только ${v.allow.join(", ")}`);
+    if (v.deny.length) parts.push(`${t}: кроме ${v.deny.join(", ")}`);
+  }
+  if (e.age != null) parts.push(`возраст ${e.age}`);
+  for (const f of e.flags.filter(f => f.startsWith("core."))) parts.push(((R[f] || {}).title || f).toLowerCase());
+  return parts.join(" · ");
+}
+
+function renderUsers() {
+  if (!S.users.length) { $("#users").innerHTML = '<div class="empty">Пока никого. Скажите колонке «давай познакомимся».</div>'; return; }
+  $("#users").innerHTML = S.users.map(u => `
+    <div class="card" data-user="${esc(u.id)}">
+      <div class="head"><div class="name">${esc(u.name)}${u.unverified ? '<span class="chip warn">без ролей — права гостя</span>' : ""}</div>
+        <div class="meta">id: ${esc(u.id)} · голос: ${u.voice.samples ? u.voice.samples + " обр." : "не записан"}
+          ${u.last_seen ? "· узнан " + new Date(u.last_seen * 1000).toLocaleString("ru") : ""}</div></div>
+      <div class="grid">
+        <div><label>Имя</label><input type="text" data-k="name" maxlength="40" value="${esc(u.name)}"></div>
+        <div><label>Дата рождения${u.age != null ? ` (${u.age} лет)` : ""}</label><input type="date" data-k="birth_date" value="${esc(u.birth_date || "")}"></div>
+        <div class="wide"><label>Обращения через запятую</label><input type="text" data-k="aliases" value="${esc(u.aliases.join(", "))}"></div>
+        <div class="wide"><label>Роли</label><div class="checks">${S.roles.filter(r => !r.builtin).map(r =>
+          `<label><input type="checkbox" data-role-id="${esc(r.id)}" ${u.roles.includes(r.id) ? "checked" : ""}> ${esc(r.title)}</label>`).join("")}</div></div>
+      </div>
+      <div class="summary">Итого: ${esc(describe(u))}</div>
+      <div class="actions"><button class="primary" data-save-user>Сохранить</button>
+        <select data-merge><option value="">Объединить с…</option>${S.users.filter(x => x.id !== u.id).map(x =>
+          `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select>
+        <button class="danger" data-del-user>Удалить</button><span class="status"></span></div>
+    </div>`).join("");
+}
+
+const ACTIONS = {mode_on: "включён режим", mode_off: "сняты ограничения", user_changed: "изменён человек",
+  user_merged: "объединение", user_deleted: "удалён человек", role_created: "новая роль",
+  role_changed: "изменена роль", role_deleted: "удалена роль", setting: "настройка"};
+const VIA = {voice: "голосом", admin: "из админки", api: "по API"};
+
+async function renderLog() {
+  const rows = await api("GET", "/audit?limit=30");
+  $("#log").innerHTML = rows.length ? rows.map(r => `<div class="row"><div>
+      <b>${esc(ACTIONS[r.action] || r.action)}</b> ${esc(VIA[r.via] || r.via)}
+      ${r.actor ? "· " + esc(userName(r.actor)) : ""} <span class="meta">${esc(JSON.stringify(r.detail))}</span></div>
+      <span class="meta">${new Date(r.ts * 1000).toLocaleString("ru")}</span></div>`).join("")
+    : '<div class="status">Пусто</div>';
 }
 
 async function load() {
-  try { data = await api("GET", "/profiles"); render(); }
-  catch (e) { $("#list").innerHTML = `<div class="empty">Не загрузилось: ${esc(e.message)}</div>`; }
+  S = await api("GET", "/state");
+  renderNow(); renderRoles(); renderUsers();
+  renderLog().catch(() => {});
 }
 
-$("#roles").addEventListener("click", async ev => {
-  const btn = ev.target.closest("button[data-act]");
-  if (!btn) return;
-  const el = btn.closest(".card"), id = el.dataset.role, status = $(".status", el);
+function status(card, text) { const s = card.querySelector(".actions .status"); if (s) s.textContent = text; }
+
+document.addEventListener("click", async ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  const role = b.closest("[data-role]"), user = b.closest("[data-user]");
   try {
-    if (btn.dataset.act === "save-role") {
-      const body = {title: $("[name=title]", el).value};
-      if ($("[name=deny_tags]", el)) {
-        body.allow_modules = $$("[name=allow]:checked", el).map(i => i.value);
-        body.deny_modules = $$("[name=deny]:checked", el).map(i => i.value);
-        body.deny_tags = split($("[name=deny_tags]", el).value);
-        const ctl = $("[name=control]", el);
-        if (ctl) body.control = ctl.checked;
-      }
-      await api("PATCH", "/roles/" + id, body);
-      await load();
-      loadNow();
-    } else if (btn.dataset.act === "delete-role") {
-      if (!confirm("Удалить роль? У людей она снимется.")) return;
-      await api("DELETE", "/roles/" + id);
-      await load();
+    if (b.dataset.set !== undefined) {
+      const tri = b.closest(".tri"); tri.dataset.state = b.dataset.set;
+      tri.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+      return;
     }
-  } catch (e) { status.textContent = "Ошибка: " + e.message; }
-});
-
-$("#add-role").addEventListener("click", async () => {
-  const title = $("#new-role").value.trim();
-  if (!title) return;
-  try { await api("POST", "/roles", {title}); $("#new-role").value = ""; await load(); }
-  catch (e) { $("#add-role-status").textContent = "Ошибка: " + e.message; }
-});
-
-$("#list").addEventListener("click", async ev => {
-  const btn = ev.target.closest("button[data-act]");
-  if (!btn) return;
-  const el = btn.closest(".card"), id = el.dataset.id, status = $(".status", el);
-  const val = n => $(`[name=${n}]`, el).value;
-  try {
-    if (btn.dataset.act === "save") {
-      const age = val("age");
-      await api("PATCH", "/profiles/" + id, {
-        name: val("name"), aliases: split(val("aliases")),
-        roles: $$("[name=role]:checked", el).map(i => i.value),
-        ...(age ? {age: Number(age)} : {clear_age: true}),
+    if (b.dataset.relax !== undefined) {
+      S.control = await api("POST", "/control/relax", {who: b.dataset.relax ? [b.dataset.relax] : null});
+      return load();
+    }
+    if (b.id === "ov-go") {
+      const body = {mode: $("#ov-mode").value, who: $("#ov-who").value ? [$("#ov-who").value] : null};
+      if ($("#ov-until").value) body.until = $("#ov-until").value;
+      else if ($("#ov-min").value) body.minutes = +$("#ov-min").value;
+      await api("POST", "/control/override", body);
+      $("#ov-status").textContent = "Включено";
+      return load();
+    }
+    if (b.id === "add-role") {
+      const t = $("#new-role").value.trim(); if (!t) return;
+      await api("POST", "/roles", {title: t}); $("#new-role").value = "";
+      return load();
+    }
+    if (b.hasAttribute("data-save-role")) {
+      const allow = {}, deny = {};
+      role.querySelectorAll(".tri").forEach(t => {
+        if (t.dataset.state === "allow") allow[t.dataset.right] = [];
+        if (t.dataset.state === "deny") deny[t.dataset.right] = [];
       });
-      await load();
-      loadNow();
-    } else if (btn.dataset.act === "merge") {
-      const into = val("into"), target = data.profiles.find(p => p.id === into);
-      if (!confirm(`Перенести голос в профиль «${target.name}» и удалить этот профиль?`)) return;
-      await api("POST", `/profiles/${id}/merge`, {into});
-      await load();
-    } else if (btn.dataset.act === "delete") {
-      if (!confirm("Удалить профиль вместе с записанным голосом?")) return;
-      await api("DELETE", "/profiles/" + id);
-      await load();
+      role.querySelectorAll("[data-vals]").forEach(i => {
+        const vals = i.value.split(",").map(x => x.trim()).filter(Boolean);
+        if (vals.length) (i.dataset.vals === "allow" ? allow : deny)[i.dataset.right] = vals;
+      });
+      await api("PATCH", "/roles/" + role.dataset.role, {title: $("[data-k=title]", role).value, allow, deny});
+      return load();
     }
-  } catch (e) { status.textContent = "Ошибка: " + e.message; }
+    if (b.hasAttribute("data-del-role")) {
+      if (!confirm("Удалить роль? У людей она снимется.")) return;
+      await api("DELETE", "/roles/" + role.dataset.role); return load();
+    }
+    if (b.hasAttribute("data-save-user")) {
+      await api("PATCH", "/users/" + user.dataset.user, {
+        name: $("[data-k=name]", user).value,
+        birth_date: $("[data-k=birth_date]", user).value,
+        aliases: $("[data-k=aliases]", user).value.split(","),
+        roles: [...user.querySelectorAll("[data-role-id]:checked")].map(i => i.dataset.roleId)});
+      return load();
+    }
+    if (b.hasAttribute("data-del-user")) {
+      if (!confirm("Удалить человека вместе с голосом?")) return;
+      await api("DELETE", "/users/" + user.dataset.user); return load();
+    }
+  } catch (e) {
+    const card = role || user;
+    if (card) status(card, "Ошибка: " + e.message);
+    else if (b.id === "ov-go") $("#ov-status").textContent = "Ошибка: " + e.message;
+    else alert(e.message);
+  }
 });
 
-const SOURCE = {schedule: "по расписанию", override: "по команде", default: ""};
-
-function renderNow(c) {
-  const until = s => s ? " до " + new Date(s).toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"}) : "";
-  const rows = c.people.map(r => `<div class="row">
-      <div><b>${esc(r.name ?? "Голос не узнан")}</b> —
-        <span class="${r.restricted ? "mode-on" : ""}">${esc(r.title)}</span>${esc(until(r.until))}
-        <span class="status">${esc(SOURCE[r.source] ?? "")}</span></div>
-      ${r.restricted && r.id ? `<button data-who="${esc(r.id)}">Снять</button>` : ""}
-    </div>`).join("");
-  const ob = $("#onboarding");
-  ob.checked = c.onboarding_enabled; ob.disabled = false;
-  const any = c.people.some(r => r.restricted);
-  $("#now").innerHTML = rows + `<div class="actions">
-      ${any ? '<button class="primary" data-who="">Снять все ограничения</button>' : '<span class="status">Ограничений нет</span>'}
-      <span class="status" id="now-status"></span></div>`;
-}
-
-async function loadNow() {
-  try { renderNow(await api("GET", "/control")); }
-  catch (e) { $("#now").innerHTML = `<div class="status">Не загрузилось: ${esc(e.message)}</div>`; }
-}
-
-$("#now").addEventListener("click", async ev => {
-  const btn = ev.target.closest("button[data-who]");
-  if (!btn) return;
-  const who = btn.dataset.who;
-  if (!confirm(who ? "Вернуть обычный режим для этого профиля?" : "Вернуть обычный режим для всех?")) return;
-  try { renderNow(await api("POST", "/control/relax", {who: who ? [who] : null})); }
-  catch (e) { $("#now-status").textContent = "Ошибка: " + e.message; }
+document.addEventListener("change", async ev => {
+  const sel = ev.target.closest("[data-merge]");
+  if (sel && sel.value) {
+    const user = sel.closest("[data-user]");
+    if (!confirm(`Перенести голос «${userName(user.dataset.user)}» в «${userName(sel.value)}» и удалить «${userName(user.dataset.user)}»?`)) { sel.value = ""; return; }
+    try { await api("POST", `/users/${user.dataset.user}/merge`, {into: sel.value}); load(); }
+    catch (e) { status(user, "Ошибка: " + e.message); sel.value = ""; }
+  }
+  if (ev.target.id === "onboarding" || ev.target.id === "guest") {
+    try {
+      await api("POST", "/settings", {[ev.target.id === "guest" ? "guest_enabled" : "onboarding_enabled"]: ev.target.checked});
+      $("#settings-status").textContent = "Сохранено"; load();
+    } catch (e) { $("#settings-status").textContent = "Ошибка: " + e.message; }
+  }
 });
 
-$("#onboarding").addEventListener("change", async ev => {
-  const on = ev.target.checked;
-  try { renderNow(await api("POST", "/settings", {onboarding_enabled: on})); }
-  catch (e) { ev.target.checked = !on; $("#onboarding-status").textContent = "Ошибка: " + e.message; }
-});
-
-load();
-loadNow();
-setInterval(loadNow, 60000);
+load().catch(e => { document.querySelector("main").insertAdjacentHTML("afterbegin", `<div class="card">Ошибка: ${esc(e.message)}</div>`); });
+setInterval(() => api("GET", "/control").then(c => { if (S) { S.control = c; renderNow(); } }).catch(() => {}), 60000);
 </script>
 </body>
 </html>
