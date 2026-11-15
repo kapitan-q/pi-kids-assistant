@@ -168,6 +168,12 @@ d = say("Капитан Немо, отбой тишины")
 check("кодовой фразой без права снимать — нельзя", "телефон" in d.get("reply", "") and d["limits"]["mode"] == "quiet", d)
 
 call("DELETE", "/control/override", admin=True)
+d = say("сними с паузы")
+check("«сними с паузы» — команда плееру, а не снятие режима", kind(d) == "resume" and not d.get("parent_command"), d)
+_, r = call("GET", "/policy?device_id=" + DEVICE)
+check("/policy?device_id — лимиты отдаются", "max_volume" in r, r)
+
+call("DELETE", "/control/override", admin=True)
 call("POST", "/reset", {"device_id": DEVICE})
 failed = [n for ok, n in results if not ok]
 print(f"\nИтого: {len(results) - len(failed)}/{len(results)} OK" + ("" if not failed else "\nНе прошло:\n  - " + "\n  - ".join(failed)))

@@ -320,7 +320,8 @@ async def handle_text(device_id: str, text: str, speaker: str | None,
         cmd_text = rest if rest is not None else text
         result = await handle_parent_command(cmd_text, can_relax=admin_verified or controller,
                                              actor=speaker, via="api" if admin_verified else "voice")
-        if result:
+        if result:   # лимиты — уже с учётом только что включённого/снятого режима
+            lim = policy.limits(policy.resolve(speaker))
             return await _answer(cmd_text, result["reply"], None, lim, parent_command=True)
         if rest is not None:
             return await _answer(cmd_text, lang.t("parent.not_understood"), None, lim, parent_command=True)
