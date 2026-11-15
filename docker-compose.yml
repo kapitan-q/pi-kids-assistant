@@ -34,8 +34,8 @@ services:
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}   # /admin: bcrypt пароля родителя
     volumes:
       - ./config:/config:ro          # speaker.yaml, modules.yaml, lang/ — правятся на лету
-      - ./data/state:/data/state     # временные команды, бюджеты ночных сказок
-      - ./data/core:/data/core       # профили и голоса
+      - ./data/state:/data/state     # прежний state.json (импортируется в speaker.db при первом старте)
+      - ./data/core:/data/core       # speaker.db (люди, роли, режимы, журнал) и голоса
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
       interval: 30s
