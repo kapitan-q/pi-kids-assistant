@@ -2,6 +2,11 @@ from datetime import timedelta
 
 import db
 import policy
+import rights
+
+
+def G(age):
+    return rights.Grants(flags={"books"}, age=age)
 
 NIGHT = {"from": "21:30", "to": "07:00", "mode": "night"}
 HOMEWORK = {"days": ["mon-fri"], "from": "15:00", "to": "17:00", "mode": "homework"}
@@ -69,9 +74,9 @@ def test_check_playback_age(at):
     at(2026, 11, 16, 12)
     res = policy.resolve(None)
     item = {"source": "books", "tags": [], "age_min": 8}
-    assert policy.check_playback(res, item, {"age": 6})
-    assert policy.check_playback(res, item, {"age": 9}) is None
-    assert policy.check_playback(res, item, {"age": None}) is None
+    assert policy.check_playback(res, item, G(6))
+    assert policy.check_playback(res, item, G(9)) is None
+    assert policy.check_playback(res, item, G(None)) is None
 
 
 def test_check_playback_modules(at, monkeypatch):
