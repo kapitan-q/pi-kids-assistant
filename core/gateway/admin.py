@@ -5,7 +5,9 @@
 Люди появляются только знакомством голосом с колонки.
 """
 import base64
+import contextlib
 import hmac
+import json
 import logging
 import os
 from datetime import date, datetime, timedelta
@@ -286,3 +288,28 @@ def relax(body: RelaxIn):
 @router.get("/api/audit")
 def audit(limit: int = 50):
     return db.audit_tail(max(1, min(limit, 500)))
+
+
+# ---------- приложение для телефона (android-client, кладётся scripts/publish_apk.sh) ----------
+
+APP_DIR = Path(os.getenv("APP_DIR", "/data/app"))
+
+
+@router.get("/api/app")
+def app_info():
+    apk = APP_DIR / "kids-speaker.apk"
+    if not apk.is_file():
+        return {"available": False}
+    meta = {}
+    with contextlib.suppress(OSError, ValueError):
+        meta = json.loads((APP_DIR / "version.json").read_text("utf-8"))
+    return {"available": True, "size_mb": round(apk.stat().st_size / 2**20, 1),
+            "updated": int(apk.stat().st_mtime), **meta}
+
+
+@router.get("/app.apk")
+def app_apk():
+    apk = APP_DIR / "kids-speaker.apk"
+    if not apk.is_file():
+        raise HTTPException(404, "приложение ещё не собрано (scripts/publish_apk.sh)")
+    return FileResponse(apk, media_type="application/vnd.android.package-archive", filename="kids-speaker.apk")

@@ -254,3 +254,16 @@ def test_admin_settings(client):
     r = client.post("/admin/api/settings", headers=auth(), json={"guest_enabled": False, "onboarding_enabled": False})
     assert r.json()["guest_enabled"] is False and r.json()["onboarding_enabled"] is False
     assert not policy.guest_enabled() and not policy.onboarding_enabled()
+
+
+def test_admin_app_download(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(admin, "APP_DIR", tmp_path)
+    assert client.get("/admin/api/app", headers=auth()).json() == {"available": False}
+    assert client.get("/admin/app.apk", headers=auth()).status_code == 404
+    (tmp_path / "kids-speaker.apk").write_bytes(b"PK\x03\x04apk")
+    (tmp_path / "version.json").write_text('{"version": "0.1 (1)"}')
+    j = client.get("/admin/api/app", headers=auth()).json()
+    assert j["available"] and j["version"] == "0.1 (1)"
+    assert client.get("/admin/app.apk").status_code == 401
+    r = client.get("/admin/app.apk", headers=auth())
+    assert r.status_code == 200 and r.content.startswith(b"PK") and "android" in r.headers["content-type"]

@@ -1,7 +1,7 @@
 # Домашняя голосовая колонка: ядро + модули
 
 ```
-Pi (слово активации, микрофон, mpv → Bluetooth-колонка)
+Pi или Android-телефон (слово активации, микрофон, плеер → Bluetooth-колонка)
    │  HTTPS + basic-auth колонки
    ▼
 Traefik ─► gateway ─┬─► stt      (faster-whisper)           ┐
@@ -24,6 +24,7 @@ modules/books  каталог сказок и аудиокниг поверх Au
 config/        speaker.yaml (режимы, расписание, голос), modules.yaml, lang/ru.yaml (фразы ядра)
 data/          состояние: core/ (speaker.db — люди, роли, режимы, журнал; голоса), logs/, books/, backups/ — не в git
 pi-client/     клиент для Raspberry Pi (README-pi.md)
+android-client/ клиент для Android-телефона (вместо Pi; сборка — scripts/publish_apk.sh)
 ```
 
 ## Запуск
@@ -57,6 +58,30 @@ curl -u speaker:ПАРОЛЬ https://ks.dameni.org/health   # {"ok": ядро, "
   ```
 - Сквозная проверка через `/text`: `python3 scripts/smoke_test.py`;
   регрессия агента на реальных фразах из логов: `scripts/replay_phrases.py run|diff`.
+
+## Клиент на Android (вместо Raspberry Pi)
+
+`android-client/` — то же, что `pi-client`, но на старом телефоне (Android 11+): свой микрофон, звук —
+в колонку по Bluetooth. Слово активации «Hey Jarvis» (те же модели openWakeWord, что на Pi) и большая
+кнопка «Говорить» на экране. Протокол шлюза общий — Pi можно оставить или убрать.
+
+**Установка на телефон**
+1. Откройте `/admin` на телефоне → «Приложение для телефона» → «Скачать APK», разрешите установку из браузера.
+2. Откройте «Колонка», разрешите микрофон и уведомления, согласитесь «не оптимизировать батарею».
+3. Подержите заголовок «Колонка» 3 секунды → настройки: пароль колонки (`.speaker-password`),
+   `device_id` — `kids-room` (должен быть в `ALLOWED_DEVICES`; если Pi работает параллельно — дайте
+   телефону другое имя и допишите его туда).
+4. Подключите Bluetooth-колонку, телефон — на зарядку. Чтобы после перезагрузки колонка заработала сама,
+   выберите «Колонку» рабочим столом по умолчанию (Android не даёт включать микрофон из фона).
+   На Xiaomi/Huawei/Samsung ещё: автозапуск разрешён, батарея — «без ограничений».
+
+**Сборка** (компьютер с JDK 17 и Android SDK; тесты — `android-client/gradlew testDebugUnitTest`)
+- Ключ подписи — один раз: `keytool -genkeypair -keystore ~/.kids-speaker/keystore.jks -alias kids-speaker
+  -keyalg RSA -validity 20000` и `~/.kids-speaker/keystore.properties` (`storeFile`, `storePassword`,
+  `keyAlias`, `keyPassword`). Копия ключа уходит на сервер в `data/app/` (бэкап): без того же ключа
+  обновление не встанет поверх.
+- `scripts/publish_apk.sh` — тесты, подписанная сборка, выкладка в `data/app/` → ссылка в `/admin`.
+- Эталон для теста слова активации: `android-client/tools/oww_reference.py` (Python + openwakeword).
 
 ## Модули
 

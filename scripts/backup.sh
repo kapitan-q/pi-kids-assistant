@@ -15,7 +15,8 @@ find library -name metadata.json -print0 | tar czf "$OUT/library-meta-$TS.tgz" -
 docker compose exec -T gateway python -c "
 import sqlite3; s = sqlite3.connect('/data/core/speaker.db'); d = sqlite3.connect('/data/core/speaker.backup.db')
 s.backup(d); d.close(); s.close()" || echo "$(date -Is) WARN: снимок speaker.db не сделан"
-tar czf "$OUT/state-$TS.tgz" --exclude='speaker.db' --exclude='speaker.db-*' \
-  config data/state $(ls -d data/books data/core 2>/dev/null)
+# data/app — ключ подписи приложения для телефона (сам APK не нужен: пересобирается)
+tar czf "$OUT/state-$TS.tgz" --exclude='speaker.db' --exclude='speaker.db-*' --exclude='*.apk' \
+  config data/state $(ls -d data/books data/core data/app 2>/dev/null)
 find "$OUT" \( -name 'abs-config-*.tgz' -o -name 'library-meta-*.tgz' -o -name 'state-*.tgz' \) -mtime +"$KEEP_DAYS" -delete
 echo "$(date -Is) ok $(du -h "$OUT/abs-config-$TS.tgz" | cut -f1)"

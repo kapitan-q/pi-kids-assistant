@@ -115,6 +115,12 @@
   </div>
   <div id="users"><div class="empty">Загружаю…</div></div>
 
+  <h1>Приложение для телефона</h1>
+  <p class="lead">Старый Android-телефон (11 и новее) вместо Raspberry Pi: слушает «Hey Jarvis», звук — в
+    колонку по Bluetooth. Откройте эту страницу на телефоне, скачайте и установите (разрешите установку
+    из этого браузера). В приложении 3 секунды подержите заголовок «Колонка» — настройки: пароль колонки.</p>
+  <div id="app" class="card"><div class="status">Загружаю…</div></div>
+
   <h1>Журнал</h1>
   <div id="log" class="card log"><div class="status">Загружаю…</div></div>
 </main>
@@ -256,10 +262,20 @@ async function renderLog() {
     : '<div class="status">Пусто</div>';
 }
 
+async function renderApp() {
+  const a = await api("GET", "/app");
+  $("#app").innerHTML = a.available
+    ? `<div class="row"><div><b>Колонка ${esc(a.version || "")}</b>
+         <span class="meta">${a.size_mb} МБ · ${new Date(a.updated * 1000).toLocaleString("ru")}</span></div>
+         <a href="/admin/app.apk"><button class="primary">Скачать APK</button></a></div>`
+    : '<div class="status">Ещё не собрано — scripts/publish_apk.sh</div>';
+}
+
 async function load() {
   S = await api("GET", "/state");
   renderNow(); renderRoles(); renderUsers();
   renderLog().catch(() => {});
+  renderApp().catch(() => {});
 }
 
 function status(card, text) { const s = card.querySelector(".actions .status"); if (s) s.textContent = text; }
